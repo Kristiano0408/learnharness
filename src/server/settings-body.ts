@@ -23,8 +23,9 @@ import type {
 	GraphSettings,
 	ModelsSettings,
 	RoleModelOverride,
+	CustomEndpointsSettings,
 } from "../core/settings.ts";
-import { BACKGROUND_MODEL_ROLES, COMPACTION_THRESHOLD_FLOOR, EXTRACTION_CHUNK_TOKENS_FLOOR, MODEL_SLOTS } from "../core/settings.ts";
+import { BACKGROUND_MODEL_ROLES, COMPACTION_THRESHOLD_FLOOR, EXTRACTION_CHUNK_TOKENS_FLOOR, MODEL_SLOTS, isValidCustomEndpointId, sanitizeCustomBaseUrl } from "../core/settings.ts";
 import { WRITABLE_TOOL_KEYS } from "../core/pending.ts";
 import { isDictationLanguage } from "../core/dictation.ts";
 
@@ -386,6 +387,60 @@ export function parseDictationSettingsBody(body: unknown): SettingsBodyResult<Di
 	return { ok: true, settings: { language: raw.language } };
 }
 
+/** customEndpoints: { endpoints?: Record<id, {id, label?, baseUrl, requiresKey?}> }
+ *  (custom-endpoints wave, 2026-10-28). Strict write side: every entry must
+ *  carry a valid slug id + a well-formed http(s) base URL; the map key must
+ *  agree with the entry's id. An empty section (no endpoints) clears the
+ *  section — replace-whole like every other section. The key itself
+ *  (CUSTOM_<id>_API_KEY) lives in the auth store, written through
+ *  /api/keys/:id like every provider key. */
+export function parseCustomEndpointsSettingsBody(body: unknown): SettingsBodyResult<CustomEndpointsSettings> {
+	const raw = asRecord(body);
+	if (!raw) return { ok: false, error: "Invalid JSON body" };
+	const settings: CustomEndpointsSettings = {};
+	if (raw.endpoints !== undefined) {
+		const endpoints = asRecord(raw.endpoints);
+		if (!endpoints) return { ok: false, error: "endpoints must be an object" };
+		const parsed: Record<string, NonNullable<CustomEndpointsSettings["endpoints"]>[string]> = {};
+		for (const [key, value] of Object.entries(endpoints)) {
+			const entry = asRecord(value);
+			if (!entry) return { ok: false, error: `endpoint "${key}" must be an object` };
+			if (entry.id !== key) {
+				return { ok: false, error: `endpoint "${key}" must carry its own id (got ${JSON.stringify(entry.id)})` };
+			}
+			if (!isValidCustomEndpointId(key)) {
+				return { ok: false, error: `endpoint id "${key}" must be a slug (letters, digits, dash, underscore; max 32 chars)` };
+			}
+			const baseUrl = sanitizeCustomBaseUrl(entry.baseUrl);
+			if (!baseUrl) {
+				return { ok: false, error: `endpoint "${key}" needs an http(s) baseUrl, e.g. "http://localhost:8080/v1"` };
+			}
+			const endpoint: NonNullable<CustomEndpointsSettings["endpoints"]>[string] = { id: key, baseUrl };
+			if (entry.label !== undefined) {
+				if (typeof entry.label !== "string" || !entry.label.trim()) {
+					return { ok: false, error: `endpoint "${key}" label must be a non-empty string` };
+				}
+				endpoint.label = entry.label.trim();
+			}
+			if (entry.requiresKey !== undefined) {
+				if (typeof entry.requiresKey !== "boolean") {
+					return { ok: false, error: `endpoint "${key}" requiresKey must be a boolean` };
+				}
+				endpoint.requiresKey = entry.requiresKey;
+			}
+			if (entry.vision !== undefined) {
+				if (typeof entry.vision !== "boolean") {
+					return { ok: false, error: `endpoint "${key}" vision must be a boolean` };
+				}
+				endpoint.vision = entry.vision;
+			}
+			parsed[key] = endpoint;
+		}
+		if (Object.keys(parsed).length) settings.endpoints = parsed;
+	}
+	return { ok: true, settings };
+}
+
 /** The section→parser map for PUT /api/settings/[section] (the route also
  *  carries the special prompts sub-resource). */
 export const SETTINGS_SECTIONS = {
@@ -397,6 +452,7 @@ export const SETTINGS_SECTIONS = {
 	compaction: parseCompactionSettingsBody,
 	models: parseModelsSettingsBody,
 	dictation: parseDictationSettingsBody,
+	customEndpoints: parseCustomEndpointsSettingsBody,
 } as const;
 
 export type SettingsSectionName = keyof typeof SETTINGS_SECTIONS;

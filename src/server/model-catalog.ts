@@ -19,13 +19,53 @@
 
 import { clampThinkingLevel, getSupportedThinkingLevels, type Api, type Model } from "@earendil-works/pi-ai";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { piModels } from "../agent/models.ts";
+import { customProviderId, piModels, refreshCustomProvider, syncCustomProvider } from "../agent/models.ts";
 import { chatGPTConnected, chatGPTModel, chatGPTModels, refreshChatGPTModels } from "../agent/chatgpt-bridge.ts";
+import type { ChatSettings } from "../core/contracts/chat.ts";
 import { NATIVE_SUBSCRIPTIONS } from "../core/contracts/subscriptions.ts";
 import { nativeSubscriptionId, nativeSubscriptionConnected, nativeSubscriptionModel, nativeSubscriptionModels, refreshSubscriptionModels } from "../agent/subscription-bridge.ts";
+import { customEndpointEnvVar, isCustomProviderId, type CustomEndpoint } from "../core/settings.ts";
+import { settingsStore } from "../store/settings.ts";
+import { effectiveSettings } from "./stores.ts";
+import { keyValue } from "./keys.ts";
+
+/** The record's custom endpoints, fresh per call. */
+function customEndpoints(): CustomEndpoint[] {
+	return Object.values(settingsStore.readSettings()?.customEndpoints?.endpoints ?? {});
+}
+
+/** Re-register every custom endpoint's provider (idempotent upsert) and
+ *  refresh its discovered catalog. Runs inside refreshConnectionCatalog
+ *  (every catalog read AND every turn gate), so the provider set is always
+ *  current — a saved endpoint federates its models with no restart. A
+ *  removed endpoint is deleted from the collection too. */
+export async function syncCustomEndpointProviders(): Promise<void> {
+	const live = customEndpoints();
+	syncCustomProvidersFromRecord({ customEndpoints: { endpoints: Object.fromEntries(live.map((e) => [e.id, e])) } });
+	for (const endpoint of live) await refreshCustomProvider(endpoint.id);
+}
+
+/** Reconcile the provider collection against the record's endpoint map —
+ *  registration/deletion only, no network (the engine-build path: cheap,
+ *  synchronous, fresh per call). */
+export function syncCustomProvidersFromRecord(record: { customEndpoints?: { endpoints?: Record<string, CustomEndpoint> } } | null): void {
+	const live = Object.values(record?.customEndpoints?.endpoints ?? {});
+	const configured = new Set(live.map((e) => customProviderId(e.id)));
+	for (const provider of piModels().getProviders()) {
+		if (isCustomProviderId(provider.id) && !configured.has(provider.id)) piModels().deleteProvider(provider.id);
+	}
+	for (const endpoint of live) syncCustomProvider(endpoint);
+}
 
 export async function refreshConnectionCatalog(provider?: string): Promise<void> {
+	if (provider && isCustomProviderId(provider)) {
+		const endpoint = customEndpoints().find((e) => customProviderId(e.id) === provider);
+		if (endpoint) syncCustomProvider(endpoint);
+		await refreshCustomProvider(endpoint ? endpoint.id : provider.slice("custom:".length));
+		return;
+	}
 	await Promise.all([
+		syncCustomEndpointProviders(),
 		!provider || provider === "chatgpt" ? refreshChatGPTModels(piModels().getModels("openai").filter((m): m is Model<"openai-responses"> => m.api === "openai-responses")) : Promise.resolve(),
 		!provider || nativeSubscriptionId(provider) ? refreshSubscriptionModels() : Promise.resolve(),
 	]);
@@ -34,10 +74,6 @@ function connectionModel(provider: string, id: string): Model<Api> | undefined {
 	return provider === "chatgpt" ? chatGPTModel(id) : nativeSubscriptionId(provider) ? nativeSubscriptionModel(provider, id) : piModels().getModel(provider, id);
 }
 function connectionProviderIds(): string[] { return [...piModels().getProviders().map((p) => p.id), "chatgpt", ...NATIVE_SUBSCRIPTIONS.map((p) => p.logicalId)]; }
-import { settingsStore } from "../store/settings.ts";
-import { effectiveSettings } from "./stores.ts";
-import { keyValue } from "./keys.ts";
-import type { ChatSettings } from "../core/contracts/chat.ts";
 import type {
 	CatalogDefaults,
 	CatalogProvider,
@@ -133,7 +169,11 @@ export function catalogSlots(): SlotPins {
 /** The providers surface (model slots wave, 2026-09-20): one row per
  *  plain-key model provider (core/auth-keys.ts's pi-ai-derived table),
  *  with keyPresent read env-wins through the keys seam, fresh per call —
- *  saving a key immediately federates the provider into the picker. */
+ *  saving a key immediately federates the provider into the picker.
+ *  Custom endpoints (custom-endpoints wave, 2026-10-28): every endpoint in
+ *  the record joins the surface — a keyless local server is configured by
+ *  definition (keyPresent true when `requiresKey` is off), a keyed one
+ *  federates exactly when its auth-store key is present. */
 export function catalogProviders(): CatalogProvider[] {
 	return AUTH_PROVIDER_KEYS.map((p) => ({
 		id: p.id,
@@ -142,6 +182,11 @@ export function catalogProviders(): CatalogProvider[] {
 	})).concat([
 		{ id: "chatgpt", envVar: "", keyPresent: chatGPTConnected() },
 		...NATIVE_SUBSCRIPTIONS.map((p) => ({ id: p.logicalId, envVar: "", keyPresent: nativeSubscriptionConnected(p.providerId) })),
+		...customEndpoints().map((e) => ({
+			id: customProviderId(e.id),
+			envVar: customEndpointEnvVar(e.id),
+			keyPresent: e.requiresKey ? keyValue(customEndpointEnvVar(e.id)) !== undefined : true,
+		})),
 	]).sort((a, b) => a.id.localeCompare(b.id));
 }
 
@@ -151,7 +196,6 @@ export function catalogProviders(): CatalogProvider[] {
 function keyedProviderIds(): Set<string> {
 	return new Set(catalogProviders().filter((p) => p.keyPresent).map((p) => p.id));
 }
-
 /** Project one catalog model to the client DTO. */
 export function toModelDto(model: Model<Api>): ModelDto {
 	return {

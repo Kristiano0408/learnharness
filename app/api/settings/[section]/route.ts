@@ -42,6 +42,7 @@ import {
 	validateChatSettings,
 	validateModelsSettings,
 	writeSettingsRecord,
+	syncCustomEndpointProviders,
 	type SettingsBodyResult,
 } from "@/src/server";
 
@@ -129,5 +130,10 @@ export async function PUT(request: Request, ctx: { params: Promise<{ section: st
 	// along untouched (other sections, unknown keys — sanitize preserves).
 	const next = { ...record, [section]: sectionOut };
 	writeSettingsRecord(next);
+	// Custom endpoints (custom-endpoints wave, 2026-10-28): a saved endpoint
+	// federates immediately — re-register its provider and discover its
+	// catalog before the response lands, so the picker (and every engine
+	// path) sees it with no restart.
+	if (section === "customEndpoints") await syncCustomEndpointProviders();
 	return Response.json({ settings: next });
 }

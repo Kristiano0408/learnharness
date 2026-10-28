@@ -34,6 +34,76 @@ import type { ChatSettings } from "./contracts/chat.ts";
 import type { SearchEngineId } from "./search.ts";
 import { isDictationLanguage, type DictationLanguage } from "./dictation.ts";
 
+// ─── Custom endpoints (custom-endpoints wave, 2026-10-28) ───────────────────
+// User-owned OpenAI-compatible endpoints (llama.cpp / Ollama / vLLM / LM
+// Studio / any OpenAI-completions server). The record holds the endpoint
+// METADATA only — the API key lives in the auth store (auth.json) under the
+// `CUSTOM_<endpointId>_API_KEY` env-var name, exactly like every other
+// provider key (the keys seam reflects it into process.env). The provider id
+// a model pin carries is `custom:<endpointId>`.
+
+/** The provider-id prefix every custom endpoint's models carry. A pin's
+ *  provider is `custom:<id>`; the id part is the endpoint's slug. */
+export const CUSTOM_PROVIDER_PREFIX = "custom" as const;
+
+/** Is this provider id a custom endpoint (`custom:<slug>`)? */
+export function isCustomProviderId(provider: string): boolean {
+	return provider.startsWith(`${CUSTOM_PROVIDER_PREFIX}:`);
+}
+
+/** The auth-store env-var name a custom endpoint's key rides in. */
+export function customEndpointEnvVar(endpointId: string): string {
+	return `CUSTOM_${endpointId}_API_KEY`;
+}
+
+/** An endpoint id must be a slug: letters/digits/dash/underscore, used
+ *  verbatim into the env-var name and the `custom:<id>` provider id. */
+export function isValidCustomEndpointId(id: string): boolean {
+	return /^[a-z0-9][a-z0-9_-]{0,31}$/i.test(id);
+}
+
+/** One custom endpoint's stored metadata (settings.json `customEndpoints`
+ *  section). `baseUrl` is the OpenAI-compatible server root, e.g.
+ *  "http://localhost:8080/v1" (llama.cpp) or "http://localhost:11434/v1"
+ *  (Ollama). `requiresKey` is the user's explicit choice: a local server
+ *  may run keyless; a hosted one needs its key. */
+export interface CustomEndpoint {
+	/** The slug used in the provider id and the env-var name. */
+	id: string;
+	label?: string;
+	baseUrl: string;
+	/** When true, the endpoint's key (auth.json) gates its models in the
+	 *  picker and the key-pres refusal gate fires without it. Default false
+	 *  (keyless local servers work out of the box). */
+	requiresKey?: boolean;
+	/** When true, the endpoint's discovered models are image-capable and
+	 *  federate into the VISION slot's picker (the vision tier filters to
+	 *  models with image input). Default false. */
+	vision?: boolean;
+}
+
+/** The settings.json section: the user's custom endpoints, keyed by id. */
+export interface CustomEndpointsSettings {
+	endpoints?: Record<string, CustomEndpoint>;
+}
+
+/** Validate + normalize an OpenAI-compatible base URL: http(s) only, and a
+ *  trailing slash is cut (pi-ai joins paths onto the base). Returns the
+ *  normalized URL, or null when the value is unusable. */
+export function sanitizeCustomBaseUrl(value: unknown): string | null {
+	if (typeof value !== "string") return null;
+	const trimmed = value.trim();
+	if (!trimmed) return null;
+	let url: URL;
+	try {
+		url = new URL(trimmed);
+	} catch {
+		return null;
+	}
+	if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+	return trimmed.replace(/\/+$/, "");
+}
+
 /** The schema version this code understands. Bump ONLY for breaking shape
  *  changes (a field renamed/meaning changed); pure additions never bump. */
 export const CURRENT_SETTINGS_VERSION = 1;
@@ -158,8 +228,13 @@ export interface ProviderKeyMissing {
 const PROVIDER_KEY_MISSING_TAIL = "key is set — add one in Settings → Keys";
 export function providerKeyMissing(provider: string, slots: ModelSlotName[]): ProviderKeyMissing {
 	const label = AUTH_PROVIDER_KEYS.find((p) => p.id === provider)?.label ?? provider;
+	// Custom endpoints carry no catalog label (the user's own naming lives
+	// in the record); the refusal reads "No custom endpoint <id> key…".
+	const customLabel = isCustomProviderId(provider)
+		? `custom endpoint ${provider.slice(CUSTOM_PROVIDER_PREFIX.length + 1)}`
+		: undefined;
 	return {
-		error: `No ${label} ${PROVIDER_KEY_MISSING_TAIL}`,
+		error: `No ${customLabel ?? label} ${PROVIDER_KEY_MISSING_TAIL}`,
 		code: PROVIDER_KEY_MISSING_CODE,
 		provider,
 		slots,
@@ -374,6 +449,9 @@ export interface UserSettings {
 	appearance?: AppearanceSettings;
 	graph?: GraphSettings;
 	compaction?: CompactionSettings;
+	/** The user's custom OpenAI-compatible endpoints (custom-endpoints wave,
+	 *  2026-10-28). Their keys live in auth.json, never here. */
+	customEndpoints?: CustomEndpointsSettings;
 	[key: string]: unknown;
 }
 
@@ -494,6 +572,38 @@ function sanitizeModels(raw: Record<string, unknown>): ModelsSettings {
 		const cleaned = sanitizeRoleOverride(raw[slot]);
 		if (cleaned) out[slot] = cleaned;
 	}
+	return out;
+}
+
+/** One custom-endpoint entry (custom-endpoints wave): strict on known
+ *  fields, drop-never-throw. An invalid id or base URL drops the whole
+ *  entry (the record can never hold an endpoint the engine band would
+ *  choke on). */
+function sanitizeCustomEndpoint(raw: unknown): CustomEndpoint | undefined {
+	if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+	const r = raw as Record<string, unknown>;
+	if (typeof r.id !== "string" || !isValidCustomEndpointId(r.id)) return undefined;
+	const baseUrl = sanitizeCustomBaseUrl(r.baseUrl);
+	if (!baseUrl) return undefined;
+	const out: CustomEndpoint = { id: r.id, baseUrl };
+	if (typeof r.label === "string" && r.label.trim()) out.label = r.label.trim();
+	if (typeof r.requiresKey === "boolean") out.requiresKey = r.requiresKey;
+	if (typeof r.vision === "boolean") out.vision = r.vision;
+	return out;
+}
+
+/** The customEndpoints section: only well-formed entries survive. */
+function sanitizeCustomEndpoints(raw: Record<string, unknown>): CustomEndpointsSettings {
+	const out: CustomEndpointsSettings = {};
+	const endpoints = raw.endpoints;
+	if (endpoints === null || typeof endpoints !== "object" || Array.isArray(endpoints)) return out;
+	const cleaned: Record<string, CustomEndpoint> = {};
+	for (const [key, entry] of Object.entries(endpoints as Record<string, unknown>)) {
+		const endpoint = sanitizeCustomEndpoint(entry);
+		// The map key must agree with the entry's own id — one truth.
+		if (endpoint && endpoint.id === key) cleaned[endpoint.id] = endpoint;
+	}
+	if (Object.keys(cleaned).length) out.endpoints = cleaned;
 	return out;
 }
 
@@ -640,6 +750,13 @@ export function sanitizeUserSettings(raw: unknown): UserSettings | null {
 	if (r.models !== null && typeof r.models === "object" && !Array.isArray(r.models)) {
 		const models = sanitizeModels(r.models as Record<string, unknown>);
 		if (Object.keys(models).length) out.models = models;
+	}
+	if (r.customEndpoints !== null && typeof r.customEndpoints === "object" && !Array.isArray(r.customEndpoints)) {
+		// A KNOWN section: always reconstruct — a raw entry the sanitizer
+		// drops must never survive through the unknown-key passthrough
+		// (the models section's phantom-drop rule, tightened here: the
+		// emptied section lands as {} = no endpoints, never the raw junk).
+		out.customEndpoints = sanitizeCustomEndpoints(r.customEndpoints as Record<string, unknown>);
 	}
 	if (r.graph !== null && typeof r.graph === "object" && !Array.isArray(r.graph)) {
 		out.graph = sanitizeGraph(r.graph as Record<string, unknown>);

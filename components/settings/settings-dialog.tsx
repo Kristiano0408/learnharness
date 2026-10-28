@@ -47,6 +47,7 @@ import type { ModelsSettings } from "@/src/core";
 import { MENU_CLOSE_EVENT, MENU_OPEN_EVENT } from "@/components/menu-shell";
 import { notifySettingsSaved } from "@/components/settings-signal";
 import { KeysSection } from "./keys-section.tsx";
+import { CustomEndpointsSection } from "./custom-endpoints-section.tsx";
 import { Hint } from "@/components/ui/hint";
 import { AppearanceSection, GraphSection } from "./appearance-section.tsx";
 import { KeyboardSection } from "./keyboard-section.tsx";
@@ -226,7 +227,7 @@ export function SettingsDialogBody({
 	 *  schema mistake caught by the validation surface). */
 	const write = useCallback(
 		async (
-			section: "general" | "agent" | "models" | "appearance" | "graph" | "compaction",
+			section: "general" | "agent" | "models" | "appearance" | "graph" | "compaction" | "customEndpoints",
 			body: object,
 		) => {
 			setError(null);
@@ -370,8 +371,12 @@ export function SettingsDialogBody({
 							)}
 							{active === "keys" && (
 								<SettingsSection title="Providers" testid="section-keys">
-									<KeysSection initialRow={initialRow ?? undefined} />
-								</SettingsSection>
+									<KeysSection initialRow={initialRow ?? undefined} />								<CustomEndpointsSection
+									endpoints={record.customEndpoints?.endpoints}
+									onWrite={(next) =>
+										void write("customEndpoints", { endpoints: next })
+									}
+								/>								</SettingsSection>
 							)}
 							{active === "agent" && (
 								<SettingsSection

@@ -52,7 +52,9 @@ import {
 	validateKeyShape,
 } from "../core/auth-keys.ts";
 import { authStore } from "../store/auth.ts";
+import { settingsStore } from "../store/settings.ts";
 import { isSubscriptionProvider, subscriptionConnected } from "../agent/subscription-connections.ts";
+import { CUSTOM_PROVIDER_PREFIX, customEndpointEnvVar, isCustomProviderId, isValidCustomEndpointId } from "../core/settings.ts";
 
 // The once-per-process boot record — globalThis anchor (HMR re-imports the
 // module; the snapshot must not re-run and misread fill-gapped vars as real
@@ -73,9 +75,24 @@ function boot(): AuthBoot {
 }
 
 /** Is `id` a WRITABLE key name — curated catalog or model-provider env
- *  var (provider-keys interlude: PUT/DELETE accept both). */
+ *  var (provider-keys interlude: PUT/DELETE accept both), or a custom
+ *  endpoint's env var (custom-endpoints wave: writable iff the endpoint
+ *  exists in the record). */
 export function isWritableAuthKey(id: string): boolean {
-	return isKnownAuthKey(id) || isProviderEnvVar(id);
+	return isKnownAuthKey(id) || isProviderEnvVar(id) || isCustomEndpointKey(id);
+}
+
+/** Is `id` the env-var name of a custom endpoint the record holds? */
+export function isCustomEndpointKey(id: string): boolean {
+	const endpoint = customEndpointFromKey(id);
+	return endpoint !== undefined && settingsStore.readSettings()?.customEndpoints?.endpoints?.[endpoint] !== undefined;
+}
+
+/** The endpoint slug a `CUSTOM_<slug>_API_KEY` var names, or undefined. */
+export function customEndpointFromKey(id: string): string | undefined {
+	if (!id.startsWith("CUSTOM_") || !id.endsWith("_API_KEY")) return undefined;
+	const slug = id.slice("CUSTOM_".length, -"_API_KEY".length);
+	return isValidCustomEndpointId(slug) ? slug : undefined;
 }
 
 /** The settings page's provider dropdown: every pi-ai provider that takes
@@ -109,6 +126,9 @@ export function initAuthEnv(): void {
 		// an env-exported OPENAI_API_KEY with a file copy gets honest shadow
 		// semantics, exactly like the curated vars.
 		...AUTH_PROVIDER_KEYS.map((p) => p.envVar),
+		// Custom endpoint keys are managed names too (custom-endpoints wave):
+		// same env-wins / fill-gap semantics as every provider var.
+		...customEndpointKeyNames(),
 	]);
 	if (envKeysIgnored()) {
 		// THE FRESH-USER SWITCH: delete every managed env var (re-run on
@@ -137,6 +157,13 @@ export function initAuthEnv(): void {
  *  or held in the file)? */
 function isManagedName(name: string): boolean {
 	return isWritableAuthKey(name) || name in authStore.authVars();
+}
+
+/** The env-var names of the custom endpoints the record holds (the boot
+ *  fill-gap's managed set; re-read live so a fresh endpoint's key gets
+ *  reflected on the next initAuthEnv call). */
+function customEndpointKeyNames(): string[] {
+	return Object.keys(settingsStore.readSettings()?.customEndpoints?.endpoints ?? {}).map(customEndpointEnvVar);
 }
 
 /**
@@ -179,7 +206,7 @@ export function resolveKeyStatuses(
 
 /** The GET view: every curated key (present or not) + unknown file vars. */
 export function keyStatuses(): AuthKeyStatus[] {
-	return resolveKeyStatuses(authStore.authVars(), process.env, boot().realEnv, AUTH_PROVIDER_ENV_VARS);
+	return resolveKeyStatuses(authStore.authVars(), process.env, boot().realEnv, new Set([...AUTH_PROVIDER_ENV_VARS, ...customEndpointKeyNames()]));
 }
 
 /** The live value for one var, env-first (the env-wins rule) — the canonical
@@ -199,9 +226,17 @@ export function keyValue(id: string): string | undefined {
  * Reads through keyValue — the SAME env-first lookup pi-ai performs
  * natively at every request — so an env-shadowed key counts as present
  * (gate by what would run). Providers absent from AUTH_PROVIDER_KEYS take
- * no key at all: nothing to gate, present by definition. */
+ * no key at all: nothing to gate, present by definition. Custom endpoints
+ * (custom-endpoints wave, 2026-10-28): gated by their own `requiresKey`
+ * choice — a keyless local server is present by definition, a keyed one by
+ * its auth-store var. */
 export function providerKeyPresent(provider: string): boolean {
 	if (isSubscriptionProvider(provider)) return subscriptionConnected(provider);
+	if (isCustomProviderId(provider)) {
+		const endpoint = settingsStore.readSettings()?.customEndpoints?.endpoints?.[provider.slice(CUSTOM_PROVIDER_PREFIX.length + 1)];
+		if (!endpoint) return true; // unknown custom id: nothing to gate
+		return endpoint.requiresKey ? keyValue(customEndpointEnvVar(endpoint.id)) !== undefined : true;
+	}
 	const info = AUTH_PROVIDER_KEYS.find((p) => p.id === provider);
 	return info ? keyValue(info.envVar) !== undefined : true;
 }

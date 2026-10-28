@@ -47,7 +47,7 @@ import { persistTurn, triggerExtraction, TurnPersistenceError } from "./turn-ser
 import { hasProbeDone, danglingQuestionOf } from "../core/native-messages.ts";
 import { composeInstructions } from "../agent/teacher-agent.ts";
 import { ensureCompacted, kickCompaction, effectiveThresholdTokens } from "./compaction.ts";
-import { catalogContextLimits, refreshConnectionCatalog } from "./model-catalog.ts";
+import { catalogContextLimits, refreshConnectionCatalog, syncCustomProvidersFromRecord } from "./model-catalog.ts";
 import { emit } from "../core/events.ts";
 import { settledTurnResponse } from "./turn-runs.ts";
 import { asAgentMessages } from "../core/native-messages.ts";
@@ -139,9 +139,14 @@ setTurnRunner(async (chatId, input) => {
 /** The settings-resolved engine for one role — BYOK (owner, 2026-09-22):
  *  the chain (role override → slot → NOTHING) may end empty, and undefined
  *  flows through to the per-need refusal gates (runner/extraction), read
- *  FRESH so a settings PUT between dispatch and spawn lands. */
+ *  FRESH so a settings PUT between dispatch and spawn lands. Custom
+ *  endpoints (custom-endpoints wave, 2026-10-28): the live provider set is
+ *  reconciled first — a saved/removed endpoint lands here with no restart
+ *  (sync-only: the catalogs refresh on the catalog read and the turn gate). */
 function resolveEngine(role: ModelRole): PiEngine | undefined {
-	const spec = resolveRoleSpec(role, stores.settingsStore.readSettings());
+	const record = stores.settingsStore.readSettings();
+	syncCustomProvidersFromRecord(record);
+	const spec = resolveRoleSpec(role, record);
 	return spec ? piEngineForSpec(spec) : undefined;
 }
 

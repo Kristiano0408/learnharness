@@ -4,7 +4,9 @@ import { modelCatalog, refreshConnectionCatalog } from "@/src/server";
  * The model picker's data (model-control wave): pi-ai's configured-provider
  * catalog as client-safe DTOs — id/name/cost/context/modality plus each
  * model's SUPPORTED thinking levels (per its thinkingLevelMap). Static
- * catalog: no network, stable within a pi-ai version.
+ * catalog: no network, stable within a pi-ai version. Custom endpoints
+ * (custom-endpoints wave): their discovered catalogs ride the same
+ * collection — refreshConnectionCatalog syncs the live set first.
  */
 export async function GET() {
 	await refreshConnectionCatalog();
