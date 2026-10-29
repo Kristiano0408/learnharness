@@ -6,7 +6,7 @@ import {
 	type AgentBuildOptions,
 	type TeachingAgent,
 } from "../agent/teacher-agent.ts";
-import { piEngineForSpec, type PiEngine } from "../agent/models.ts";
+import { piEngineForSpec, resolveEngineForSpec, type PiEngine } from "../agent/models.ts";
 import { connectionBackgroundAllowed, connectionScopeCurrent, isSubscriptionProvider } from "../agent/subscription-connections.ts";
 import { nativeSubscriptionError } from "../agent/subscription-stream.ts";
 import { chatGPTStreamError } from "../agent/chatgpt-stream.ts";
@@ -146,13 +146,19 @@ setTurnRunner(async (chatId, input) => {
  *  flows through to the per-need refusal gates (runner/extraction), read
  *  FRESH so a settings PUT between dispatch and spawn lands. Custom
  *  endpoints (custom-endpoints wave, 2026-10-28): the live provider set is
- *  reconciled first — a saved/removed endpoint lands here with no restart
- *  (sync-only: the catalogs refresh on the catalog read and the turn gate). */
-function resolveEngine(role: ModelRole): PiEngine | undefined {
+ *  reconciled first — a saved/removed endpoint lands here with no restart.
+ *  ASYNC since the custom catalog integrity ruling (2026-10-29): the
+ *  background engine paths (extraction stages, jobs) build through
+ *  `resolveEngineForSpec`, which may run ONE discovery pass for a custom
+ *  endpoint whose catalog is not populated yet (a cold boot, a rebuilt
+ *  provider, a re-keyed local server). `syncCustomProvidersFromRecord` is
+ *  signature-guarded, so an unchanged endpoint keeps its live provider and
+ *  its discovered catalog — the re-sync that used to wipe it is gone. */
+async function resolveEngine(role: ModelRole): Promise<PiEngine | undefined> {
 	const record = stores.settingsStore.readSettings();
 	syncCustomProvidersFromRecord(record);
 	const spec = resolveRoleSpec(role, record);
-	return spec ? piEngineForSpec(spec) : undefined;
+	return spec ? resolveEngineForSpec(spec) : undefined;
 }
 
 setJobRespawn((jobId) => void jobRunner.runJob(jobId));
@@ -262,13 +268,18 @@ export async function handleChatInput(
 		noDispatch: (kind) => requestCycle?.noDispatch(kind),
 	};
 	let conversationEngine: PiEngine;
-	try { conversationEngine = piEngineForSpec(conversation, () => callPurpose.background, lifecycle); }
+	try { conversationEngine = await resolveEngineForSpec(conversation, () => callPurpose.background, lifecycle); }
 	catch { return Response.json({ error: conversation.provider === "chatgpt" ? chatGPTStreamError("model catalog") : isSubscriptionProvider(conversation.provider) ? nativeSubscriptionError(conversation.provider, "model catalog") : "The selected model is unavailable." }, { status: 503 }); }
 	const modelIdForCompaction = `${conversationEngine.model.provider}:${conversationEngine.model.id}`;
+	// The compaction engine is the same pin on the background flag. Built
+	// through the discovering builder too (custom catalog integrity,
+	// 2026-10-29): a cold custom provider discovers once here, on the turn's
+	// own path, and every later lookup in the process rides the populated catalog.
+	const compactionEngine = await resolveEngineForSpec(conversation, true);
 	await ensureCompacted(
 		{
 			chatStore: stores.chatStore,
-			engine: piEngineForSpec(conversation, true),
+			engine: compactionEngine,
 			canStart: () => connectionBackgroundAllowed(conversation.provider),
 			modelId: modelIdForCompaction,
 			kind: record.kind === "practice" ? "practice" : hasProbeDone(record.messages) ? "teach" : "probe",
@@ -636,6 +647,11 @@ export async function handleChatInput(
 						const fresh = effectiveSettings();
 						const spec = resolveConversationSpec(stores.chatStore.getChat(chatId)?.settings, fresh.models.strong);
 						if (!spec || !connectionBackgroundAllowed(spec.provider)) return null;
+						// STRICTLY SYNC here on purpose (custom catalog integrity, 2026-10-29):
+						// kickCompaction's deps builder is a synchronous pre-check, and the turn
+						// that just settled already built its engine through the discovering
+						// builder — a custom provider's catalog is populated by the time this
+						// kick runs. A miss stays the silent no-op it has always been.
 						let kickEngine: PiEngine;
 						try { kickEngine = piEngineForSpec(spec, true); } catch { return null; }
 						const kickModelId = `${kickEngine.model.provider}:${kickEngine.model.id}`;

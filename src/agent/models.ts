@@ -193,17 +193,83 @@ export function customProvider(endpoint: CustomEndpoint): Provider {
 	});
 }
 
-/** Re-register one custom endpoint's provider into the process-wide
- *  collection (idempotent: setProvider upserts by id). A removed endpoint
- *  must be deleted via `removeCustomProvider` — the caller (the server
- *  composition) reconciles the live set against the record. */
-export function syncCustomProvider(endpoint: CustomEndpoint): void {
-	piModels().setProvider(customProvider(endpoint));
+// ─── custom catalog integrity (owner ruling, 2026-10-29) ────────────────────
+// THE WIPE BUG this section exists to kill: pi-ai's `setProvider` REPLACES the
+// provider object, and a provider built by `createProvider` starts with an
+// EMPTY dynamic catalog — the models discovered through `fetchModels` live in
+// the replaced provider's closure. So re-registering an UNCHANGED endpoint
+// silently destroyed its discovered models, and the next lookup threw
+// "<provider> catalog has no model <id>" — which is exactly what every
+// background engine resolution (the extraction stages and every job) did on
+// every single call, while the conversation engine (built without the re-sync)
+// kept working.
+//
+// Two rules follow, and they are the whole fix:
+//  1. Re-register only when the endpoint's REQUEST-FACING shape changed.
+//     An unchanged endpoint keeps its live provider — and its catalog.
+//  2. A miss on a custom provider is not a verdict: it triggers ONE discovery
+//     pass (single-flight) before the honest throw. A cold boot, a provider
+//     rebuilt by a real config change, or an endpoint restarted with a new
+//     model id all self-heal instead of refusing.
+
+interface LhCustomProviderGlobal {
+	/** provider id → the endpoint shape currently registered under it. */
+	__lhCustomProviderSignatures?: Map<string, string>;
+	/** provider id → the in-flight discovery pass (single-flight guard). */
+	__lhCustomCatalogFetches?: Map<string, Promise<void>>;
 }
 
-/** Drop one custom endpoint's provider + its discovered catalog. */
+/** Process-wide, on globalThis — the same module-instance reason as the
+ *  extraction registries: Next dev compiles each route entry as its own
+ *  module instance, so a module-level Map would split the truth per route. */
+function customState(): { signatures: Map<string, string>; fetches: Map<string, Promise<void>> } {
+	const g = globalThis as typeof globalThis & LhCustomProviderGlobal;
+	g.__lhCustomProviderSignatures ??= new Map();
+	g.__lhCustomCatalogFetches ??= new Map();
+	return { signatures: g.__lhCustomProviderSignatures, fetches: g.__lhCustomCatalogFetches };
+}
+
+/** What makes a re-register worth its cost (losing the discovered catalog):
+ *  the fields the REQUEST path reads — where it talks, whether a key gates
+ *  it, and whether its models federate into the vision picker. A label is
+ *  display-only and deliberately excluded: renaming an endpoint must not
+ *  destroy its catalog, and the settings-save path refreshes anyway. */
+function customEndpointSignature(endpoint: CustomEndpoint): string {
+	return JSON.stringify([endpoint.baseUrl, endpoint.requiresKey === true, endpoint.vision === true]);
+}
+
+/** Re-register one custom endpoint's provider into the process-wide
+ *  collection — IDEMPOTENT in the real sense (custom catalog integrity,
+ *  2026-10-29): an endpoint whose registered shape is unchanged keeps its
+ *  live provider and everything it discovered. A removed endpoint must be
+ *  deleted via `removeCustomProvider` — the caller (the server composition)
+ *  reconciles the live set against the record. */
+export function syncCustomProvider(endpoint: CustomEndpoint): void {
+	const providerId = customProviderId(endpoint.id);
+	const state = customState();
+	const signature = customEndpointSignature(endpoint);
+	if (state.signatures.get(providerId) === signature && piModels().getProvider(providerId)) return;
+	piModels().setProvider(customProvider(endpoint));
+	state.signatures.set(providerId, signature);
+}
+
+/** Drop one custom endpoint's provider + its discovered catalog + its
+ *  registered shape (so a re-added endpoint rebuilds instead of riding a
+ *  stale signature). */
 export function removeCustomProvider(endpointId: string): void {
-	piModels().deleteProvider(customProviderId(endpointId));
+	const providerId = customProviderId(endpointId);
+	piModels().deleteProvider(providerId);
+	const state = customState();
+	state.signatures.delete(providerId);
+	state.fetches.delete(providerId);
+}
+
+/** Forget every registered custom shape (test seam: a fresh process behaves
+ *  like a fresh process). */
+export function resetCustomProviderState(): void {
+	const state = customState();
+	state.signatures.clear();
+	state.fetches.clear();
 }
 
 /** Refresh one custom endpoint's discovered catalog (never throws — a dead
@@ -212,6 +278,26 @@ export function removeCustomProvider(endpointId: string): void {
 export async function refreshCustomProvider(endpointId: string): Promise<Error | undefined> {
 	const result = await piModels().refresh({ providers: [customProviderId(endpointId)] });
 	return result.errors.get(customProviderId(endpointId));
+}
+
+/** ONE discovery pass for one custom endpoint (custom catalog integrity,
+ *  2026-10-29): the engine-build path's self-heal. Concurrent misses share
+ *  one network call (a fan-out of stage engines over the same cold provider
+ *  must not stampede the local server); a dead endpoint leaves the provider
+ *  holding whatever catalog it already had, and the caller's miss stays
+ *  honest. `refresh` never rejects — errors land in its result map. */
+async function ensureCustomCatalog(endpointId: string): Promise<void> {
+	const providerId = customProviderId(endpointId);
+	const state = customState();
+	const inFlight = state.fetches.get(providerId);
+	if (inFlight) return inFlight;
+	const pass = piModels().refresh({ providers: [providerId] }).then(() => undefined);
+	state.fetches.set(providerId, pass);
+	try {
+		await pass;
+	} finally {
+		if (state.fetches.get(providerId) === pass) state.fetches.delete(providerId);
+	}
 }
 
 /** OpenRouter API key (BYOK); tests never read this — they inject engines. */
@@ -241,18 +327,25 @@ function defaultThinkingLevel(model: Model<Api>): ThinkingLevel {
 	return supported[0] ?? "off";
 }
 
-/** The production engine for a RESOLVED spec (model slots wave,
- *  2026-09-20): provider-aware catalog lookup + thinking clamp. The API
- *  key is resolved by pi-ai itself from the environment per request (the
- *  keys seam reflects file-saved keys into env), so the engine never
- *  hardcodes OpenRouter's. */
-export function piEngineForSpec(spec: ResolvedModelSpec, background: boolean | (() => boolean) = true, lifecycle?: ChatGPTDispatchLifecycle): PiEngine {
+/** The catalog lookup one spec resolves to (the sync/async engine builders
+ *  share it verbatim): the ChatGPT bridge, a native subscription bridge, or
+ *  the federated pi-ai catalog. undefined = the provider's last-known list
+ *  does not carry the pinned id. */
+function lookupSpecModel(spec: ResolvedModelSpec): Model<Api> | undefined {
 	const models: Models = piModels();
 	const nativeId = nativeSubscriptionId(spec.provider);
-	const model = spec.provider === "chatgpt" ? chatGPTModel(spec.id) : nativeId ? nativeSubscriptionModel(spec.provider, spec.id) : models.getModel(spec.provider, spec.id);
-	if (!model) {
-		throw new Error(`${spec.provider} catalog has no model ${spec.id}`);
-	}
+	return spec.provider === "chatgpt"
+		? chatGPTModel(spec.id)
+		: nativeId
+			? nativeSubscriptionModel(spec.provider, spec.id)
+			: models.getModel(spec.provider, spec.id);
+}
+
+/** The engine assembly (model + clamped level + the provider-bound stream
+ *  function) — identical for the sync and the discovery-retrying builder. */
+function assembleEngine(spec: ResolvedModelSpec, model: Model<Api>, background: boolean | (() => boolean), lifecycle: ChatGPTDispatchLifecycle | undefined): PiEngine {
+	const models: Models = piModels();
+	const nativeId = nativeSubscriptionId(spec.provider);
 	// UNSET level → the baked default order (first entry the model
 	// supports); SET level → pi's native nearest-clamp (model swaps keep
 	// the user's intent and adapt honestly).
@@ -271,6 +364,45 @@ export function piEngineForSpec(spec: ResolvedModelSpec, background: boolean | (
 			return stream(requestModel, context, { ...options, reasoning: level === "off" ? undefined : level });
 		},
 	};
+}
+
+/** The production engine for a RESOLVED spec (model slots wave,
+ *  2026-09-20): provider-aware catalog lookup + thinking clamp. The API
+ *  key is resolved by pi-ai itself from the environment per request (the
+ *  keys seam reflects file-saved keys into env), so the engine never
+ *  hardcodes OpenRouter's.
+ *
+ *  STRICTLY SYNC, and it stays that way: this is the catalog-read path — a
+ *  miss is a verdict. The background engine paths (extraction stages, jobs)
+ *  go through `resolveEngineForSpec`, which may discover; a custom provider's
+ *  catalog is only guaranteed after a discovery pass, and this entry point
+ *  must not start a network call inside a synchronous lookup. */
+export function piEngineForSpec(spec: ResolvedModelSpec, background: boolean | (() => boolean) = true, lifecycle?: ChatGPTDispatchLifecycle): PiEngine {
+	const model = lookupSpecModel(spec);
+	if (!model) {
+		throw new Error(`${spec.provider} catalog has no model ${spec.id}`);
+	}
+	return assembleEngine(spec, model, background, lifecycle);
+}
+
+/** The engine for a RESOLVED spec, ALLOWING ONE discovery pass (custom
+ *  catalog integrity, 2026-10-29): the background engine paths' builder.
+ *  Identical to `piEngineForSpec` except that a miss on a CUSTOM endpoint is
+ *  not a verdict — the endpoint's `/v1/models` is fetched once (single-flight)
+ *  and the lookup retried. That covers every real cold shape: a process that
+ *  never read the catalog, a provider rebuilt by a genuine endpoint change,
+ *  an endpoint restarted under a new model id. A non-custom provider keeps
+ *  the exact sync semantics (no network, no retry). */
+export async function resolveEngineForSpec(spec: ResolvedModelSpec, background: boolean | (() => boolean) = true, lifecycle?: ChatGPTDispatchLifecycle): Promise<PiEngine> {
+	let model = lookupSpecModel(spec);
+	if (!model && isCustomProviderId(spec.provider)) {
+		await ensureCustomCatalog(spec.provider.slice(CUSTOM_PROVIDER_PREFIX.length + 1));
+		model = lookupSpecModel(spec);
+	}
+	if (!model) {
+		throw new Error(`${spec.provider} catalog has no model ${spec.id}`);
+	}
+	return assembleEngine(spec, model, background, lifecycle);
 }
 
 /** The LEGACY role entry point — BYOK made it an honest THROWER (owner,

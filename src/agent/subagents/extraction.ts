@@ -717,8 +717,13 @@ export interface ExtractionModels {
 	 *  job runner got, read FRESH per stage call (a settings PUT between
 	 *  stages lands). BYOK (owner, 2026-09-22): the chain (role override →
 	 *  slot → NOTHING) may end EMPTY → undefined; the front doors refuse
-	 *  with ModelsNotConfiguredError before any stage runs. */
-	engineFor?: (role: ModelRole) => PiEngine | undefined;
+	 *  with ModelsNotConfiguredError before any stage runs.
+	 *
+	 *  MAY BE ASYNC (custom catalog integrity, 2026-10-29): a custom endpoint's
+	 *  model catalog is discovered lazily, so the seam may return a promise —
+	 *  the pipeline awaits it before any stage runs. Sync seams (every test's
+	 *  scripted engine) ride the same code untouched. */
+	engineFor?: (role: ModelRole) => PiEngine | undefined | Promise<PiEngine | undefined>;
 	/** Key-presence gate (provider-key interlude, 2026-09-25): given a
 	 *  stage engine's provider + the role's slot tier, the injected check
 	 *  returns the refusal envelope when the provider's key is missing
@@ -811,17 +816,37 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 	// engineFor chain (role override → slot → nothing, resolved FRESH per
 	// stage call server-side) — the job runner's exact treatment. undefined
 	// = the BYOK chain came up empty; the front-door guards turn that into
-	// an honest refusal.
-	const stageEngine = (role: ModelRole, override?: PiEngine): PiEngine | undefined =>
+	// an honest refusal. The chain may hand back a PROMISE (a custom engine
+	// discovering its catalog, 2026-10-29); a direct test value short-circuits
+	// without touching it.
+	const stageEngine = (role: ModelRole, override?: PiEngine): PiEngine | undefined | Promise<PiEngine | undefined> =>
 		override ?? deps.engineFor?.(role);
+	/** THE CONDITIONAL-AWAIT RULE (2026-10-29): `await` always yields a
+	 *  microtask, and the front doors' ordering is load-bearing — the refusal
+	 *  gate and the run-registry row (the dock's status chips, the abort
+	 *  handle) must land in the SAME synchronous pass they always did. So a
+	 *  sync chain stays fully synchronous, and only a chain that actually
+	 *  returned a promise defers. */
+	function isPending(value: unknown): value is Promise<unknown> {
+		return typeof value === "object" && value !== null && typeof (value as { then?: unknown }).then === "function";
+	}
 	/** The per-need refusal guard: which slot tiers the pipeline's stages
 	 *  found unset (test values count as configured — they ARE engines),
 	 *  and whether a configured stage's provider key is gone (provider-key
-	 *  interlude, 2026-09-25) — both refuse BEFORE any batch runs. */
-	function refuseIfStagesUnready(): void {
+	 *  interlude, 2026-09-25) — both refuse BEFORE any batch runs. Returns a
+	 *  promise ONLY when a stage engine is still being discovered. */
+	function refuseIfStagesUnready(): void | Promise<void> {
+		const extractor = stageEngine("extractor", deps.extractor);
+		const auditor = stageEngine("auditor", deps.auditor);
+		if (isPending(extractor) || isPending(auditor)) {
+			return Promise.all([extractor, auditor]).then(([resolvedExtractor, resolvedAuditor]) => refuseWithResolved(resolvedExtractor, resolvedAuditor));
+		}
+		refuseWithResolved(extractor as PiEngine | undefined, auditor as PiEngine | undefined);
+	}
+	function refuseWithResolved(extractorEngine: PiEngine | undefined, auditorEngine: PiEngine | undefined): void {
 		const stages: readonly [ModelRole, PiEngine | undefined][] = [
-			["extractor", stageEngine("extractor", deps.extractor)],
-			["auditor", stageEngine("auditor", deps.auditor)],
+			["extractor", extractorEngine],
+			["auditor", auditorEngine],
 		];
 		const missing = new Set<ModelSlotName>();
 		for (const [role, engine] of stages) if (!engine) missing.add(ROLE_SLOT[role]);
@@ -951,8 +976,9 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 		);
 		const t0 = performance.now();
 
+		const extractorEngine = stageEngine("extractor", deps.extractor);
 		const findings = await runExtractor(
-			stageEngine("extractor", deps.extractor),
+			isPending(extractorEngine) ? await extractorEngine : extractorEngine,
 			sourceId,
 			prompt,
 			new Set(graph.nodes.map((n) => n.id)),
@@ -983,8 +1009,9 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 		// projection omits messageId (2026-10-13): the auditor is
 		// IDENTITY-only and never sees the passages, so anchors are useless
 		// to it — they add cognitive load, not signal.
+		const auditorEngine = stageEngine("auditor", deps.auditor);
 		const auditResult = await runAuditor(
-			stageEngine("auditor", deps.auditor),
+			isPending(auditorEngine) ? await auditorEngine : auditorEngine,
 			sourceId,
 			`Proposed findings from the extractor (the source itself is not available to you — the extractor is fully trusted; the propositions only — the reasoning chains are the merger's business, owner 2026-09-30):\n\n` +
 				`${JSON.stringify(
@@ -1174,7 +1201,11 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 			// (2026-09-25): the write channel needs extractor + auditor
 			// engines AND their providers' keys; a refusal lands BEFORE any
 			// stage runs (typed — the trigger skips, routes surface 503).
-			refuseIfStagesUnready();
+			// Conditional await (2026-10-29): a custom endpoint's engine may
+			// discover its catalog first — still before any stage runs, and a
+			// sync chain keeps the gate's original synchronous ordering.
+			const stageGate = refuseIfStagesUnready();
+			if (stageGate) await stageGate;
 			const covered = coverageOf(record.messages, wsGraph.readCoverage(), chatId);
 			const failedOutputCalls = failedOutputCallIds(record.messages);
 			if (covered.uncovered.length === 0) {
@@ -1351,8 +1382,9 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 				`${digest === "" ? "" : `, digest ${digest.split("\n").length} lines`})`,
 		);
 		const t0 = performance.now();
+		const extractorEngine = stageEngine("extractor", deps.extractor);
 		const findings = await runNotesExtractor(
-			stageEngine("extractor", deps.extractor),
+			isPending(extractorEngine) ? await extractorEngine : extractorEngine,
 			input.id,
 			prompt,
 			new Set(graph.nodes.map((n) => n.id)),
@@ -1384,7 +1416,10 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 			// BYOK per-need gate (owner, 2026-09-22) + key presence
 			// (2026-09-25): same refusal as the chat front door — no
 			// extractor/auditor engines, or a stage key gone, no run.
-			refuseIfStagesUnready();
+			// Conditional await (2026-10-29): a custom endpoint's engine may
+			// discover its catalog first — the notes import's old failure mode.
+			const stageGate = refuseIfStagesUnready();
+			if (stageGate) await stageGate;
 			// CHUNKED like the chat path (owner, 2026-09-28): each chunk is a
 			// standalone extract → audit → merge, so no single call carries a
 			// whole large file. Abort mid-run keeps earlier chunks merged

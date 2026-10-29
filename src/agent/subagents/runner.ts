@@ -78,8 +78,13 @@ export interface JobRunnerDeps {
 	 *  wiring passes effectiveSettings-based resolution). Test overrides
 	 *  (below) still win. BYOK (owner, 2026-09-22): the chain may end
 	 *  EMPTY → undefined; runJob then refuses the spawn honestly instead
-	 *  of guessing a model. */
-	engineFor?: (role: ModelRole) => PiEngine | undefined;
+	 *  of guessing a model.
+	 *
+	 *  MAY BE ASYNC (custom catalog integrity, 2026-10-29): a custom endpoint's
+	 *  catalog is discovered lazily, so the seam may return a promise — the
+	 *  runner awaits it before the key gate and before the loop. Sync seams
+	 *  (every test's scripted engine) ride the same code untouched. */
+	engineFor?: (role: ModelRole) => PiEngine | undefined | Promise<PiEngine | undefined>;
 	/** The search seam (search port wave, 2026-09-20): resolves the LIVE
 	 *  provider fresh per job — server/search.ts composition injected by
 	 *  the wiring; null = honestly unavailable (the researcher's web_search
@@ -167,8 +172,10 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 	/** The engine one job runs on: test override first (the old seam —
 	 *  tests swap scripted engines without touching deps), then the injected
 	 *  settings-resolved engineFor. undefined = the BYOK chain came up
-	 *  empty (owner, 2026-09-22) — runJob refuses below, honestly. */
-	function pickEngine(kind: JobKind): PiEngine | undefined {
+	 *  empty (owner, 2026-09-22) — runJob refuses below, honestly. The chain
+	 *  may hand back a PROMISE (a custom engine discovering its catalog,
+	 *  2026-10-29). */
+	function pickEngine(kind: JobKind): PiEngine | undefined | Promise<PiEngine | undefined> {
 		const testOverride: Record<string, { current?: PiEngine } | undefined> = {
 			researcher: researchModelOverride,
 			demoBuilder: demoModelOverride,
@@ -176,6 +183,14 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 			pdfReader: pdfModelOverride,
 		};
 		return testOverride[KIND_ROLE[kind]]?.current ?? deps.engineFor?.(KIND_ROLE[kind]);
+	}
+	/** THE CONDITIONAL-AWAIT RULE (2026-10-29, the extraction precedent):
+	 *  `await` always yields a microtask, and the runner's ordering is
+	 *  load-bearing (the abort registry, the activity feed, the usage tap must
+	 *  land in the pass they always did). A sync chain stays fully synchronous;
+	 *  only a chain that actually returned a promise defers. */
+	function isPending(value: unknown): value is Promise<unknown> {
+		return typeof value === "object" && value !== null && typeof (value as { then?: unknown }).then === "function";
 	}
 
 	const KIND_RUNNERS: Record<
@@ -201,7 +216,8 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 			jobStore.updateJob(jobId, { status: "error", error: `unknown kind ${job.kind}`, activity: "failed" });
 			return;
 		}
-		const engine = pickEngine(job.kind);
+		const picked = pickEngine(job.kind);
+		const engine = isPending(picked) ? await picked : picked;
 		// The per-need refusal guards (BYOK 2026-09-22 / provider-key
 		// interlude 2026-09-25): no engine for the kind's tier, or the
 		// resolved engine's provider key gone — both refuse through the SAME

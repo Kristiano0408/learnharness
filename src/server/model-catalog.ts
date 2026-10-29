@@ -19,12 +19,12 @@
 
 import { clampThinkingLevel, getSupportedThinkingLevels, type Api, type Model } from "@earendil-works/pi-ai";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { customProviderId, piModels, refreshCustomProvider, syncCustomProvider } from "../agent/models.ts";
+import { customProviderId, piModels, refreshCustomProvider, removeCustomProvider, syncCustomProvider } from "../agent/models.ts";
 import { chatGPTConnected, chatGPTModel, chatGPTModels, refreshChatGPTModels } from "../agent/chatgpt-bridge.ts";
 import type { ChatSettings } from "../core/contracts/chat.ts";
 import { NATIVE_SUBSCRIPTIONS } from "../core/contracts/subscriptions.ts";
 import { nativeSubscriptionId, nativeSubscriptionConnected, nativeSubscriptionModel, nativeSubscriptionModels, refreshSubscriptionModels } from "../agent/subscription-bridge.ts";
-import { customEndpointEnvVar, isCustomProviderId, type CustomEndpoint } from "../core/settings.ts";
+import { CUSTOM_PROVIDER_PREFIX, customEndpointEnvVar, isCustomProviderId, type CustomEndpoint } from "../core/settings.ts";
 import { settingsStore } from "../store/settings.ts";
 import { effectiveSettings } from "./stores.ts";
 import { keyValue } from "./keys.ts";
@@ -47,12 +47,15 @@ export async function syncCustomEndpointProviders(): Promise<void> {
 
 /** Reconcile the provider collection against the record's endpoint map —
  *  registration/deletion only, no network (the engine-build path: cheap,
- *  synchronous, fresh per call). */
+ *  synchronous, fresh per call). `syncCustomProvider` is signature-guarded:
+ *  an unchanged endpoint keeps its live provider and its discovered catalog
+ *  (custom catalog integrity, 2026-10-29); only a real shape change re-registers.
+ *  A removed endpoint drops its signature too, so re-adding it rebuilds. */
 export function syncCustomProvidersFromRecord(record: { customEndpoints?: { endpoints?: Record<string, CustomEndpoint> } } | null): void {
 	const live = Object.values(record?.customEndpoints?.endpoints ?? {});
 	const configured = new Set(live.map((e) => customProviderId(e.id)));
 	for (const provider of piModels().getProviders()) {
-		if (isCustomProviderId(provider.id) && !configured.has(provider.id)) piModels().deleteProvider(provider.id);
+		if (isCustomProviderId(provider.id) && !configured.has(provider.id)) removeCustomProvider(provider.id.slice(CUSTOM_PROVIDER_PREFIX.length + 1));
 	}
 	for (const endpoint of live) syncCustomProvider(endpoint);
 }
