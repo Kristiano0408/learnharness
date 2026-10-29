@@ -10,10 +10,18 @@
  * Scope (user-decided): the graph pipeline ONLY — teaching turns and
  * sub-agent jobs have their own cost channels elsewhere.
  */
+import { WORKSPACE_ID_PATTERN } from "@/config";
 import { graphCosts } from "@/src/server";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
-	return Response.json(graphCosts());
+export async function GET(req: Request) {
+	// THE WORKSPACE SELECTOR (Phase 6): absent or "global" = the legacy
+	// global graph's fold (today's default); a workspace id = that
+	// workspace directory's fold.
+	const raw = new URL(req.url).searchParams.get("workspace");
+	if (raw !== null && raw !== "global" && !WORKSPACE_ID_PATTERN.test(raw)) {
+		return Response.json({ error: "Unknown workspace", code: "unknown_workspace" }, { status: 404 });
+	}
+	return Response.json(graphCosts(raw ?? undefined));
 }

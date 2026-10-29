@@ -75,7 +75,7 @@ import { useActivity } from "@/components/activity-dock";
 import { useServerEvent, useServerResync } from "@/components/server-events";
 import { MenuShell } from "@/components/menu-shell.tsx";
 import { DeleteNodeDialog } from "@/components/delete-node-dialog.tsx";
-import { ChainTableOverlay } from "@/components/chain-table.tsx";
+import { announceScopedRevision, ChainTableOverlay } from "@/components/chain-table.tsx";
 import { Hint } from "@/components/ui/hint";
 import {
 	ARROW_LENGTH_LADDER,
@@ -148,6 +148,140 @@ export function isNodeVisible(node: Pick<GraphNode, "name" | "statement">, query
  *  the server derives the same join on its next read. */
 export function renameSessionsPatch(snapshot: Pick<GraphSnapshot, "sessions">, id: string, title: string): void {
 	snapshot.sessions[id] = title;
+}
+
+/** The scoped GET URL for one graph scope (Phase 6, export pure pin): a selected
+ *  workspace rides `?workspace=<id>`; null = the bare legacy URL — today's
+ *  pre-Phase-6 shape. Exported pure for node-test pins (the same seam governs
+ *  costs and positions commits). */
+export function graphScopedUrl(path: string, workspaceId: string | null): string {
+	return workspaceId === null ? path : `${path}?workspace=${encodeURIComponent(workspaceId)}`;
+}
+
+/** Camera memory per graph scope (Phase 6, owner ruling: camera per-scope —
+ *  zoom+pan survives a scope switch for the graph it belongs to). The bare
+ *  key is today's shape (legacy global graph); a workspace rides a suffix.
+ *  Exported pure for render pins. */
+export function cameraStorageKey(workspaceId: string | null | undefined): string {
+	return workspaceId ? `${CAMERA_STORAGE_KEY}:${workspaceId}` : CAMERA_STORAGE_KEY;
+}
+
+/* ── THE GRAPH-WVIEW WORKSPACE SELECTOR (Phase 6, decision C1 + owner
+    rulings 2026-10-29: dropdown in the controls row; camera per graph;
+    selector rendered even on an empty graph — it is the import
+    destination and a real action) ─────────────────────────────────────── */
+
+/** The selector's persisted scope (localStorage, per-device view state like
+ *  the camera — deliberately NOT server state). A workspace id rides its
+ *  own value; absent/"global" (the legacy graph) is the stored DEFAULT:
+ *  pre-Phase-6 views never stored anything and read as Global. Exported
+ *  pure for SSR pins. */
+export const GRAPH_WORKSPACE_STORAGE_KEY = "lh.graph-workspace";
+
+/** Read the persisted scope honestly: only a workspace id (the WORKSPACE_
+ *  ID_PATTERN shape, same guard the routes gate) counts; every other value
+ *  — absent, corrupt, or the "global" spelling — reads as the legacy global
+ *  graph (null). Storage only ever holds workspace ids; "global" is the
+ *  selector's default, never a stored value. */
+export function readGraphWorkspaceScope(stored: string | null): string | null {
+	if (stored && stored !== "global" && /^[A-Za-z0-9_-]+$/.test(stored)) return stored;
+	return null;
+}
+
+/** A selector option: the display label + the scope value it selects. */
+export interface GraphScopeOption {
+	/** null = Global (legacy) — the option never carries a workspace id. */
+	workspaceId: string | null;
+	label: string;
+}
+
+/** The dropdown's option list, in render order: Global (legacy) first, then
+ *  every workspace by name (createdAt order preserved — the store's own
+ *  order). Unsorted is deliberately NOT an option: it has no graph
+ *  (decision 9), and a vanished selected workspace falls back to Global
+ *  honestly (the scope value dies with its workspace). Exported pure for
+ *  SSR pins. */
+export function graphScopeOptions(
+	workspaces: readonly { id: string; name: string }[],
+): GraphScopeOption[] {
+	return [
+		{ workspaceId: null, label: "Global (legacy)" },
+		...workspaces.map((w) => ({ workspaceId: w.id, label: w.name })),
+	];
+}
+
+/** The selector control (Phase 6, owner ruling A): the graph-scope dropdown
+ *  in the controls row — Global (legacy) + every workspace. Rendered even
+ *  on an empty graph (owner ruling: it's a real action there — the import
+ *  destination and the way INTO a workspace's graph). The trigger names the
+ *  selected option; the menu lists every option, the selected one checked. */
+export function GraphScopeControl({
+	options,
+	workspaceId,
+	onSelect,
+}: {
+	options: readonly GraphScopeOption[];
+	/** null = Global (legacy). */
+	workspaceId: string | null;
+	onSelect: (workspaceId: string | null) => void;
+}) {
+	const [open, setOpen] = useState(false);
+	const triggerRef = useRef<HTMLButtonElement | null>(null);
+	const selected = options.find((o) => o.workspaceId === workspaceId) ?? options[0]!;
+	return (
+		<>
+			<div className="shrink-0 rounded-xl border bg-card/85 px-1 py-[3px] shadow-lg backdrop-blur">
+				<Hint label="Which graph to show" side="bottom">
+					<button
+						type="button"
+						ref={triggerRef}
+						data-testid="graph-scope-select"
+						aria-haspopup="menu"
+						aria-expanded={open}
+						onClick={() => setOpen((v) => !v)}
+						className="flex h-7 items-center gap-1.5 rounded-lg px-2.5 text-xs text-muted-foreground transition-colors hover:bg-accent"
+					>
+						<WaypointsIcon className="size-3" />
+						<span className="max-w-40 truncate">{selected.label}</span>
+					</button>
+				</Hint>
+			</div>
+			{open && (
+				<MenuShell anchorRef={triggerRef} testid="graph-scope-menu" preferredSide="down" menuClass="flex w-fit min-w-44 flex-col gap-0.5 rounded-xl border bg-card p-2 text-xs shadow-xl">
+					{options.map((o) => (
+						<button
+							key={o.workspaceId ?? "global"}
+							type="button"
+							data-testid={`graph-scope-option-${o.workspaceId ?? "global"}`}
+							onClick={() => {
+								setOpen(false);
+								onSelect(o.workspaceId);
+							}}
+							className={`flex items-center justify-between gap-3 rounded-lg px-2.5 py-1.5 text-left transition-colors hover:bg-accent ${
+								o.workspaceId === workspaceId ? "text-foreground" : "text-muted-foreground/80"
+							}`}
+						>
+							<span className="max-w-48 truncate">{o.label}</span>
+							{o.workspaceId === workspaceId && <span aria-hidden>✓</span>}
+						</button>
+					))}
+				</MenuShell>
+			)}
+		</>
+	);
+}
+
+/** Scope match for the scoped lh:graph-revision event (workspace wave
+ *  Phase 5): an absent detail scope is the legacy global graph's stamp —
+ *  every view without a workspace selector listens to it; a detail scope
+ *  is a workspace id, and only the view displaying that exact workspace
+ *  refreshes. Exported pure for render pins. */
+export function graphRevisionScopeMatches(
+	detail: { revision?: number; scope?: string | null | undefined } | undefined,
+	currentWorkspace: string | null | undefined,
+): boolean {
+	const scope = detail?.scope ?? null;
+	return scope === null || scope === (currentWorkspace ?? null);
 }
 
 /** Seed positions for nodes the ledger doesn't know yet (hygiene,
@@ -849,6 +983,7 @@ export function GraphChromeRow({
 	settings,
 	changeSettings,
 	onOpenChains,
+	scopeSelector,
 }: {
 	isEmpty: boolean;
 	query: string;
@@ -865,9 +1000,16 @@ export function GraphChromeRow({
 	/** Opens the chain table overlay (the chains-overlay plan,
 	 *  2026-09-29). */
 	onOpenChains: () => void;
+	/** THE GRAPH-SCOPE SELECTOR (Phase 6, owner ruling): rendered FIRST in
+	 *  the row and ALWAYS present — including on an empty graph, where it is
+	 *  a real action (the import destination + the way into a workspace's
+	 *  graph). The wrapper owns the selector's state/options; this row only
+	 *  places it. */
+	scopeSelector?: React.ReactNode;
 }) {
 	return (
 		<>
+			{scopeSelector}
 			{!isEmpty && (
 				<div className="graph-chrome-fade-in w-56 min-w-0 shrink rounded-xl border bg-card/85 px-1 py-[3px] shadow-lg backdrop-blur">
 					<Hint
@@ -986,6 +1128,73 @@ export function GraphView({
 
 	// Search panel state: the query text + the settings section toggle.
 	const [query, setQuery] = useState("");
+	/* THE GRAPH SCOPE (Phase 6, decision C1): which graph this view displays
+	   and imports into — null = Global (legacy) (data/graph/, pre-Phase-6
+	   byte-identical default). Persisted per device like the camera
+	   (`lh:graph-workspace`); Unsorted is not an option (decision 9: no
+	   graph there). */
+	const [graphWorkspaceId, setGraphWorkspaceId] = useState<string | null>(null);
+	/* The workspace list for the selector (names ride /api/workspaces — push
+	   poke, pull data: `workspaces-changed` refreshes; a rename is a shape
+	   mutation of the list, so it announces). */
+	const [scopeWorkspaces, setScopeWorkspaces] = useState<{ id: string; name: string }[]>([]);
+	const refreshScopes = useCallback(() => {
+		fetch("/api/workspaces")
+			.then((res) => res.json() as Promise<{ workspaces: { id: string; name: string }[] }>)
+			.then(({ workspaces }) => setScopeWorkspaces(workspaces.map((w) => ({ id: w.id, name: w.name }))))
+			.catch(() => {}); // selector stays on its last list — best-effort like the costs pill
+	}, []);
+	useEffect(() => {
+		refreshScopes();
+	}, [refreshScopes]);
+	const scopeDebounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+	useServerEvent("workspaces-changed", () => {
+		if (scopeDebounceRef.current) clearTimeout(scopeDebounceRef.current);
+		scopeDebounceRef.current = setTimeout(() => {
+			scopeDebounceRef.current = undefined;
+			refreshScopes();
+		}, 250);
+	});
+	useServerResync(() => refreshScopes());
+	useEffect(() => {
+		return () => {
+			if (scopeDebounceRef.current) clearTimeout(scopeDebounceRef.current);
+		};
+	}, []);
+	const scopeOptions = useMemo(() => graphScopeOptions(scopeWorkspaces), [scopeWorkspaces]);
+	/* A selected workspace that vanished (deleted elsewhere) falls back to
+	   Global honestly — the stored scope value dies with its workspace. */
+	useEffect(() => {
+		if (graphWorkspaceId === null) return;
+		if (scopeWorkspaces.length > 0 && !scopeWorkspaces.some((w) => w.id === graphWorkspaceId)) {
+			setGraphWorkspaceId(null);
+			try {
+				localStorage.removeItem(GRAPH_WORKSPACE_STORAGE_KEY);
+			} catch {
+				/* best-effort */
+			}
+		}
+	}, [scopeWorkspaces, graphWorkspaceId]);
+	const selectScope = useCallback((id: string | null) => {
+		setGraphWorkspaceId(id);
+		try {
+			if (id === null) localStorage.removeItem(GRAPH_WORKSPACE_STORAGE_KEY);
+			else localStorage.setItem(GRAPH_WORKSPACE_STORAGE_KEY, id);
+		} catch {
+			/* Storage full/blocked: the scope choice is view state — best-effort. */
+		}
+	}, []);
+	useEffect(() => {
+		const stored = (() => {
+			try {
+				return localStorage.getItem(GRAPH_WORKSPACE_STORAGE_KEY);
+			} catch {
+				return null; // blocked storage: Global (the pre-Phase-6 read)
+			}
+		})();
+		const restored = readGraphWorkspaceScope(stored);
+		if (restored !== null) setGraphWorkspaceId(restored);
+	}, []);
 	// ⌘F (shortcut wave C): the find event focuses the node search —
 	// surface-scoped, dispatched as lh:kbd-find (only this page listens).
 	const searchInputRef = useRef<HTMLInputElement>(null);
@@ -1072,7 +1281,10 @@ export function GraphView({
 	}, [snapshot, query]);
 
 	// Fetch the derived graph. Re-runs when a background pipeline run
-	// finishes (refreshTick) — its merges just landed in the ledger.
+	// finishes (refreshTick) — its merges just landed in the ledger — and
+	// when the SELECTED SCOPE changes (Phase 6): the selector is the fetch's
+	// subject, absent = the legacy global graph (?workspace=<id> when a
+	// workspace is selected).
 	const [refreshTick, setRefreshTick] = useState(0);
 	// The chain table overlay (chains-overlay plan, 2026-09-29) —
 	// component-local: a browsing surface, not graph state.
@@ -1085,7 +1297,8 @@ export function GraphView({
 	}, [chainSelectOpen]);
 	useEffect(() => {
 		let cancelled = false;
-		fetch("/api/graph")
+		const scoped = graphScopedUrl("/api/graph", graphWorkspaceId);
+		fetch(scoped)
 			.then((res) => res.json() as Promise<GraphSnapshot>)
 			.then((data) => {
 				if (!cancelled) setSnapshot(data);
@@ -1094,7 +1307,7 @@ export function GraphView({
 		return () => {
 			cancelled = true;
 		};
-	}, [refreshTick]);
+	}, [refreshTick, graphWorkspaceId]);
 
 	// Notes import (the format-agnostic front door): file picker → POST
 	// /api/graph/import; the runs surface in the status chips below, and the
@@ -1113,6 +1326,13 @@ export function GraphView({
 		},
 	});
 	const { importing, onImportFiles } = notesImport;
+	// THE WORKSPACE DESTINATION (Phase 4 seam wired by Phase 6, decision C1):
+	// the selector's workspace id feeds the import picker — every submit
+	// lands in the graph this view displays. null/Global rides undefined
+	// (the legacy destination semantics die with Phase 4: an import without
+	// a chosen workspace refuses honestly).
+	const setNotesWorkspace = notesImport.setWorkspace;
+	setNotesWorkspace(graphWorkspaceId ?? undefined);
 
 	// Background pipeline status: read /api/graph/status; whenever a run
 	// LEAVES the feed (finished / aborted / failed), refetch the graph.
@@ -1172,11 +1392,13 @@ export function GraphView({
 	// the view — the pill just stays on its last numbers.
 	const [costs, setCosts] = useState<GraphCostSummary | null>(null);
 	const refreshCosts = useCallback(() => {
-		fetch("/api/graph/costs")
+		// Phase 6: the cost pill rides the same scope selector as the snapshot.
+		const scoped = graphScopedUrl("/api/graph/costs", graphWorkspaceId);
+		fetch(scoped)
 			.then((res) => res.json() as Promise<GraphCostSummary>)
 			.then(setCosts)
 			.catch(() => {});
-	}, []);
+	}, [graphWorkspaceId]);
 	useEffect(() => {
 		refreshCosts();
 	}, [refreshCosts]);
@@ -1190,21 +1412,27 @@ export function GraphView({
 		prevRunIds.current = new Set(pipelineRuns.map((r) => r.id));
 	}, [pipelineRuns, refreshCosts]);
 
-	/* Deletion refresh (wave 6 chunk A): the DELETE /api/chats/:id response
-	   carries the new graphRevision, and the sidebar (which owns the delete
-	   flow) announces it as lh:graph-revision. The status poll above can't
-	   see a deletion — no pipeline run ever disappears from the feed for
-	   it — so this event is the one seam. Refetch the snapshot and the
-	   costs on every announcement: deletions are rare, a redundant fetch
-	   is free. */
+	/* Deletion/move refresh (wave 6 chunk A + workspace wave Phase 5/6): the
+	   DELETE /api/chats/:id response carries the new graphRevision, and the
+	   sidebar (which owns the delete flow) announces it as lh:graph-revision.
+	   The status poll above can't see a deletion — no run ever disappears from
+	   the feed for it — so this event is the one seam. Phase 6: every stamp
+	   carries its scope (null = the legacy global graph); this view listens to
+	   the stamp matching ITS selected scope (graphRevisionScopeMatches governs
+	   which view refreshes on which stamp), and a workspace-scoped stamp can
+	   now reach a view that displays that workspace. Refetch the snapshot and
+	   the costs on every match: graph rewrites are rare, a redundant fetch is
+	   free. */
 	useEffect(() => {
-		const onRevision = () => {
+		const onRevision = (event: Event) => {
+			const detail = (event as CustomEvent<{ scope?: string | null | undefined } | undefined>).detail;
+			if (!graphRevisionScopeMatches(detail, graphWorkspaceId)) return;
 			setRefreshTick((t) => t + 1);
 			refreshCosts();
 		};
 		window.addEventListener("lh:graph-revision", onRevision);
 		return () => window.removeEventListener("lh:graph-revision", onRevision);
-	}, [refreshCosts]);
+	}, [refreshCosts, graphWorkspaceId]);
 
 	/* Live rename labels (rename-shuffle fix, 2026-09-23): a session
 	   rename anywhere (sidebar inline row, chat header) announces itself
@@ -1267,6 +1495,8 @@ export function GraphView({
 	// receives it as frozen data. The local one-shot forceAtlas2 pass runs
 	// ONLY as a fallback when the ledger is absent (a graph never merged
 	// through the pipeline, e.g. tests or a fresh install).
+	// Phase 6: the layout effect re-runs on a scope switch too — every graph
+	// has its OWN positions ledger now.
 	useEffect(() => {
 		if (!snapshot || snapshot.nodes.length === 0) return;
 		// The ledger path: every positioned node uses its resting position;
@@ -1297,11 +1527,12 @@ export function GraphView({
 		return () => {
 			posRef.current = null;
 		};
-	}, [snapshot]);
-
-	// Construct the renderer once the canvas exists; destroy when it goes
-	// away (the empty-graph placeholder replaces it). The callbacks are
-	// created once and read through refs, so they never go stale.
+}, [snapshot, graphWorkspaceId]);
+	// Phase 6: the selected SCOPE recreates the renderer — its camera is
+	// per-graph (cameraStorageKey), so a scope switch retires this instance
+	// and restores/fits the other graph's own view state. The canvas node
+	// itself survives (the container keeps its ref), only the renderer
+	// inside it is rebuilt.
 	const isEmpty = snapshot === null || snapshot.nodes.length === 0;
 	useEffect(() => {
 		if (isEmpty) return;
@@ -1309,11 +1540,14 @@ export function GraphView({
 		if (!canvas) return;
 		// Persisted camera (2026-09-15): the graph reopens exactly where the
 		// user left it — zoom AND pan, in localStorage (per-device view
-		// state, deliberately NOT the server settings ledger). Absent or
-		// corrupt → undefined → the renderer fits on first open, ever.
+		// state, deliberately NOT the server settings ledger). Phase 6: the
+		// memory is PER SCOPE (cameraStorageKey) — every graph keeps its own
+		// standpoint. Absent or corrupt → undefined → the renderer fits on
+		// first open, ever.
+		const cameraKey = cameraStorageKey(graphWorkspaceId);
 		let initialCamera: { k: number; x: number; y: number } | null = null;
 		try {
-			const stored = localStorage.getItem(CAMERA_STORAGE_KEY);
+			const stored = localStorage.getItem(cameraKey);
 			if (stored) {
 				const parsed = JSON.parse(stored) as { k?: unknown; x?: unknown; y?: unknown };
 				if (
@@ -1336,7 +1570,7 @@ export function GraphView({
 			cameraTimer = setTimeout(() => {
 				cameraTimer = null;
 				try {
-					localStorage.setItem(CAMERA_STORAGE_KEY, JSON.stringify(t));
+					localStorage.setItem(cameraKey, JSON.stringify(t));
 				} catch {
 					// Storage full/blocked: camera persistence is best-effort.
 				}
@@ -1380,8 +1614,10 @@ export function GraphView({
 				},
 				// Live physics settled: persist the new rest state. Fire-and-
 				// forget — the next snapshot fetch carries the ledger anyway.
+				// Phase 6: the positions ledger rides the selected scope.
 				onCommit: (positions) => {
-					void fetch("/api/graph/positions", {
+					const scoped = graphScopedUrl("/api/graph/positions", graphWorkspaceId);
+					void fetch(scoped, {
 						method: "PUT",
 						headers: { "Content-Type": "application/json" },
 						body: JSON.stringify(positions),
@@ -1399,14 +1635,14 @@ export function GraphView({
 				clearTimeout(cameraTimer);
 				cameraTimer = null;
 				try {
-					localStorage.setItem(CAMERA_STORAGE_KEY, JSON.stringify(lastCamera));
+					localStorage.setItem(cameraKey, JSON.stringify(lastCamera));
 				} catch {
 					// best-effort
 				}
 			}
 			renderer.destroy();
 		};
-	}, [isEmpty]);
+	}, [isEmpty, graphWorkspaceId]);
 
 	// Feed #1 — data: positions + edges + clusters + resolved colors. Runs
 	// after the layout effect (same commit, declaration order) and after
@@ -1550,6 +1786,7 @@ export function GraphView({
 			    body by the component itself, lives here for state locality. */}
 			<DeleteNodeDialog
 				nodes={deletingNode ? [deletingNode] : null}
+				workspaceId={graphWorkspaceId}
 				onClose={() => setDeletingNode(null)}
 				onDeleted={(nodeIds, graphRevision) => {
 					// Close the dialog; close the detail card if it pointed here
@@ -1559,7 +1796,8 @@ export function GraphView({
 					if (selected && nodeIds.includes(selected.node.id)) setSelected(null);
 					// The wave-6 chain: every listener refetches on this. Clusters
 					// shrink / unrender below the minimum on the server's read.
-					window.dispatchEvent(new CustomEvent("lh:graph-revision", { detail: { graphRevision } }));
+					// Phase 6: the stamp rides the graph the deletion happened IN.
+					announceScopedRevision(graphRevision, graphWorkspaceId);
 				}}
 			/>
 
@@ -1613,6 +1851,9 @@ export function GraphView({
 					settings={settings}
 					changeSettings={changeSettings}
 					onOpenChains={() => setChainsOpen(true)}
+					scopeSelector={
+						<GraphScopeControl options={scopeOptions} workspaceId={graphWorkspaceId} onSelect={selectScope} />
+					}
 				/>
 			</div>
 
@@ -1704,6 +1945,7 @@ export function GraphView({
 				chains={snapshot?.chains ?? []}
 				sessions={snapshot?.sessions ?? {}}
 				fileSources={snapshot?.fileSources ?? {}}
+				workspaceId={graphWorkspaceId}
 				onClose={() => {
 					setChainsOpen(false);
 					onChainSelectClose?.();

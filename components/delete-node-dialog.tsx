@@ -130,10 +130,26 @@ export function DeleteNodeBody({
 	);
 }
 
+/**
+ * The scoped DELETE URL for one node (Phase 6, export pure pin): the node dies
+ * in the graph directory the view shows — a selected workspace rides
+ * `?workspace=<id>` (the URL carries no other query); absent (null/undefined) =
+ * the legacy global graph (today's default, byte-identical pre-Phase-6). The
+ * route gates unknown ids honestly (404), never trusts this builder.
+ */
+export function deleteNodeUrl(nodeId: string, workspaceId?: string | null): string {
+	const scoped =
+		workspaceId !== undefined && workspaceId !== null && workspaceId !== ""
+			? `?workspace=${encodeURIComponent(workspaceId)}`
+			: "";
+	return `/api/graph/nodes/${encodeURIComponent(nodeId)}${scoped}`;
+}
+
 export function DeleteNodeDialog({
 	nodes,
 	onClose,
 	onDeleted,
+	workspaceId,
 }: {
 	/** The nodes up for deletion; null/empty = closed. One (the canvas
 	 *  context menu) or many (the chain table's selection). Names from
@@ -145,6 +161,10 @@ export function DeleteNodeDialog({
 	 *  snapshot refetches. The deleted ids ride along so
 	 *  selection-side callers can prune. */
 	onDeleted: (nodeIds: string[], graphRevision: number) => void;
+	/** THE GRAPH SCOPE (Phase 6): which graph the node dies IN — a workspace
+	 *  id, or absent/"global" for the legacy global graph (today's default,
+	 *  byte-identical pre-Phase-6 behavior). The route gates unknown ids. */
+	workspaceId?: string | null;
 }) {
 	const [busy, setBusy] = useState(false);
 	const backdropDismiss = useBackdropDismiss(() => {
@@ -190,7 +210,7 @@ export function DeleteNodeDialog({
 		let revision = 0;
 		try {
 			for (const n of nodes) {
-				const res = await fetch(`/api/graph/nodes/${encodeURIComponent(n.id)}`, { method: "DELETE" });
+				const res = await fetch(deleteNodeUrl(n.id, workspaceId), { method: "DELETE" });
 				const body = (await res.json()) as {
 					error?: string;
 					code?: string;

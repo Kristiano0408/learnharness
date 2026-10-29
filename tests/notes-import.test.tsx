@@ -97,7 +97,7 @@ for (const outcome of ["completed", "failed", "partial", "aborted", "busy"] as c
 	assert.equal(finishes, 1);
 	const html = host!.innerHTML;
 	assert.doesNotMatch(html, /<button|<section|<ul|border|bg-card|rounded|shadow|Retry|Dismiss|Import complete|new propositions|Saved changes|Import stopped|already being imported/);
-	assert.deepEqual(Object.keys(current).sort(), ["errors", "importing", "onImportFiles"], "no retained rows, Files, retry or dismiss API");
+	assert.deepEqual(Object.keys(current).sort(), ["errors", "importing", "onImportFiles", "setWorkspace"], "no retained rows, Files, retry or dismiss API (setWorkspace = the Phase 4 workspace destination)");
 	if (outcome === "completed") {
 		assert.equal(html, "");
 		assert.deepEqual(current.errors, []);

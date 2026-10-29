@@ -78,18 +78,19 @@ function asRecord(body: unknown): Record<string, unknown> | null {
 	return body as Record<string, unknown>;
 }
 
-/** general: { autoUpdate?: boolean } */
+/** general: {} — empty since 2026-10-29 (owner ruling: the auto-update
+ * setting was removed wholesale; updates are purely manual). A stale client
+ * sending `autoUpdate` gets a 400, same discipline as any rejected field. */
 export function parseGeneralSettingsBody(body: unknown): SettingsBodyResult<GeneralSettings> {
 	const raw = asRecord(body);
 	if (!raw) return { ok: false, error: "Invalid JSON body" };
-	const settings: GeneralSettings = {};
-	if (raw.autoUpdate !== undefined) {
-		if (typeof raw.autoUpdate !== "boolean") {
-			return { ok: false, error: "autoUpdate must be a boolean" };
+	for (const key of Object.keys(raw)) {
+		if (key === "autoUpdate") {
+			return { ok: false, error: "autoUpdate was removed — updates are manual; do not send it" };
 		}
-		settings.autoUpdate = raw.autoUpdate;
+		return { ok: false, error: `Unknown general setting: ${key}` };
 	}
-	return { ok: true, settings };
+	return { ok: true, settings: {} };
 }
 
 /** agent.models: only the six known background roles; each override's

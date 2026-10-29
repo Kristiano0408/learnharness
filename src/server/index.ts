@@ -40,6 +40,10 @@ export * from "./turn-liveness.ts";
 export * from "./turn-runs.ts";
 export * from "./dismissal-park.ts";
 export * from "./compaction.ts";
+// Workspaces (workspace wave Phase 2, docs/workspaces.md): the session
+// filing's server surface — the list folds + the gates behind /api/workspaces*
+// and the chats filing/move routes.
+export * from "./workspaces.ts";
 export { runPiTurn, piTurnResponse, type PiTurnHandle, type PiTurnSpec } from "./pi/ui-stream.ts";
 export * from "./observability.ts";
 export * from "./model-catalog.ts";

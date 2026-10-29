@@ -24,7 +24,7 @@ import { BACKGROUND_MODEL_ROLES, type UserSettings } from "../src/core/settings.
 describe("resolveSettings", () => {
 	it("null record (first boot): non-model knobs land on factory defaults; every model view is EMPTY", () => {
 		const eff = resolveSettings(null);
-		assert.deepEqual(eff.general, { autoUpdate: true });
+		assert.deepEqual(eff.general, {});
 		assert.deepEqual(eff.agent.tools, {});
 		assert.deepEqual(eff.agent.prompts, {});
 		assert.deepEqual(eff.agent.search, {});
@@ -51,7 +51,6 @@ describe("resolveSettings", () => {
 	it("explicit record values win over every factory default", () => {
 		const record: UserSettings = {
 			version: 1,
-			general: { autoUpdate: false },
 			agent: {
 				models: { researcher: { model: { provider: "openrouter", id: "qwen/qwen3.8-flash" } } },
 				tools: { research: false },
@@ -62,7 +61,7 @@ describe("resolveSettings", () => {
 			graph: { enabled: false },
 		};
 		const eff = resolveSettings(record);
-		assert.equal(eff.general.autoUpdate, false);
+		assert.deepEqual(eff.general, {});
 		assert.deepEqual(eff.agent.models.researcher, {
 			provider: "openrouter",
 			id: "qwen/qwen3.8-flash",

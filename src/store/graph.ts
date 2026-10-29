@@ -1,6 +1,7 @@
 /**
- * GraphStore — the fs JSONL adapter: the append-only ledgers at
- * config.LEDGER_FILES (contracts.ts "v1 emission").
+ * GraphStore — the fs JSONL adapter: the append-only ledgers of ONE graph
+ * directory (config GraphFiles — src/store/graph.ts factory since the
+ * workspace wave Phase 4, docs/workspaces.md).
  *   nodes.jsonl     GraphNode        — one line per node write: the FIRST
  *                                      line for an id defines it; a later
  *                                      line with a REPEATED id is a
@@ -17,14 +18,22 @@
  * CHAINS-PRIMARY (owner, 2026-09-30): there is NO edges ledger — the edge
  * view (implication nodes + untyped arrows) is derived in core/graph.ts on
  * every read and never persisted. A stale edges.jsonl left by a pre-chains
- * build is deleted once, here, at adapter load (same doctrine as the
- * events-ledger purge below).
+ * build is deleted once, here, per-directory at factory creation (same
+ * doctrine as the events-ledger purge below).
  *
- * Plus config.SOURCES_FILE (sources.json): the imported-notes bookkeeping
+ * Plus sources.json (in the same directory): the imported-notes bookkeeping
  * (NOT a ledger) — one JSON map, src-id → NotesSource, read-modify-write
  * like a chat file. The format-agnostic front door (2026-09-13).
  *
- * Implements core/ports.ts GraphStore. data/graph/* is exclusively this
+ * PER-DIRECTORY SEAM (Phase 4): createGraphStore(files) mints one store
+ * instance bound to ONE GraphFiles directory — the legacy global graph
+ * (data/graph/, decision 9: stays where it is, read-only for new sessions)
+ * and every workspace's own dir (data/workspaces/<id>/graph/, decision 8).
+ * Every read/write in the adapter goes through `files` and NOTHING else: an
+ * instance can never straddle two directories. The format stamp
+ * (graph-format.ts) is per-directory too.
+ *
+ * Implements core/ports.ts GraphStore. Each graph dir is exclusively this
  * adapter's. Reads are strict against the contracts.ts shapes (the 2026-09-02
  * graph redesign): corrupt lines are skipped, never guessed at — the ledgers
  * are the source of truth and everything else is derived (core/graph.ts,
@@ -34,7 +43,14 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { LEDGER_FILES, POSITIONS_FILE, SOURCES_FILE } from "../../config.ts";
+import {
+	GRAPH_FORMAT_FILE,
+	LEDGER_FILES,
+	POSITIONS_FILE,
+	RENDER_SETTINGS_FILE,
+	SOURCES_FILE,
+	type GraphFiles,
+} from "../../config.ts";
 import { assertGraphFormat, ensureGraphFormat } from "./graph-format.ts";
 import type {
 	GraphChain,
@@ -48,11 +64,27 @@ import type {
 } from "../core/contracts.ts";
 import type { GraphStore } from "../core/ports.ts";
 
+/** The legacy global graph dir's file family (decision 9): data/graph/,
+ *  byte-identical to the module constants this adapter used pre-Phase-4. */
+export const LEGACY_GRAPH_FILES: GraphFiles = {
+	nodes: LEDGER_FILES.nodes,
+	chains: LEDGER_FILES.chains,
+	sessions: LEDGER_FILES.sessions,
+	coverage: LEDGER_FILES.coverage,
+	positions: POSITIONS_FILE,
+	sources: SOURCES_FILE,
+	renderSettings: RENDER_SETTINGS_FILE,
+	format: GRAPH_FORMAT_FILE,
+};
+
 // ─── JSONL primitives ────────────────────────────────────────────────────────
 
-function appendLine<T>(file: string, record: T): void {
+/** The stamp host of one graph family: every primitive carries its own
+ *  GraphFiles (per-directory seam, Phase 4). */
+
+function appendLine(files: GraphFiles, file: string, record: unknown): void {
 	fs.mkdirSync(path.dirname(file), { recursive: true });
-	ensureGraphFormat(); // the lazy format stamp (graph-format.ts)
+	ensureGraphFormat(files); // the lazy format stamp (graph-format.ts)
 	fs.appendFileSync(file, `${JSON.stringify(record)}\n`, "utf-8");
 }
 
@@ -84,8 +116,8 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 const isString = (v: unknown): v is string => typeof v === "string";
 
 /** Strict shape guards — anything not matching a W4 ledger shape is skipped. */
-function readValid<T>(file: string, isValid: (v: unknown) => v is T): T[] {
-	assertGraphFormat(); // honest refusal on a newer-stamped data dir
+function readValid<T>(files: GraphFiles, file: string, isValid: (v: unknown) => v is T): T[] {
+	assertGraphFormat(files); // honest refusal on a newer-stamped data dir
 	return readRawLines(file).filter(isValid);
 }
 
@@ -128,69 +160,80 @@ const isCoverageEntry = (v: unknown): v is CoverageEntry =>
 
 // ─── the port implementation ────────────────────────────────────────────────
 
-export const graphStore: GraphStore = {
+/** THE FACTORY (workspace wave Phase 4): one store instance bound to ONE
+ *  graph directory (GraphFiles). The legacy export `graphStore` =
+ *  createGraphStore(LEGACY_GRAPH_FILES) — byte-identical behavior to the
+ *  pre-Phase-4 module constant (the golden fixtures pin it); every other
+ *  graph dir (a workspace's data/workspaces/<id>/graph/) gets its own
+ *  instance from src/server/stores.ts's graphStoreFor. */
+export function createGraphStore(files: GraphFiles): GraphStore {
+	// One purge per directory at factory time: dead ledgers are exactly the
+	// confusion the cleanup removes (owner doctrine — nothing reads them,
+	// nothing writes them, a stale file lying around is a lie).
+	purgeLegacyLedgers(path.dirname(files.nodes));
+	return {
 	appendNode(node: GraphNode): void {
-		appendLine(LEDGER_FILES.nodes, node);
+		appendLine(files, files.nodes, node);
 	},
 	/** Raw node lines in append order. A node id may appear on more than
 	 *  one line (a later session's LINK-append: phrasings + provenance); the
 	 *  derivation (core/graph.ts getGraph) merges lines by id. */
 	readNodes(): GraphNode[] {
-		return readValid(LEDGER_FILES.nodes, isGraphNode);
+		return readValid(files, files.nodes, isGraphNode);
 	},
 
 	/** Append one chain ASSERTION; readers merge lines by (premises,
 	 *  conclusion). */
 	appendChain(assertion: GraphChain): void {
-		appendLine(LEDGER_FILES.chains, assertion);
+		appendLine(files, files.chains, assertion);
 	},
 	readChains(): GraphChain[] {
-		return readValid(LEDGER_FILES.chains, isGraphChain);
+		return readValid(files, files.chains, isGraphChain);
 	},
 
 	appendCheckpoint(checkpoint: SessionCheckpoint): void {
-		appendLine(LEDGER_FILES.sessions, checkpoint);
+		appendLine(files, files.sessions, checkpoint);
 	},
 	readCheckpoints(): SessionCheckpoint[] {
-		return readValid(LEDGER_FILES.sessions, isCheckpoint);
+		return readValid(files, files.sessions, isCheckpoint);
 	},
 
 	appendCoverage(entry: CoverageEntry): void {
-		appendLine(LEDGER_FILES.coverage, entry);
+		appendLine(files, files.coverage, entry);
 	},
 	readCoverage(): CoverageEntry[] {
-		return readValid(LEDGER_FILES.coverage, isCoverageEntry);
+		return readValid(files, files.coverage, isCoverageEntry);
 	},
 
-	// ── imported-notes bookkeeping (config.SOURCES_FILE — a JSON map) ──
+	// ── imported-notes bookkeeping (files.sources — a JSON map) ──
 
 	/** Upsert: keeps the existing record's usage log when re-importing. */
 	upsertSource(source: NotesSource): void {
-		const all = readSourceMap();
+		const all = readSourceMap(files);
 		const prev = all[source.id];
 		all[source.id] = prev ? { ...source, extractions: prev.extractions } : source;
-		writeSourceMap(all);
+		writeSourceMap(files, all);
 	},
 	readSources(): NotesSource[] {
-		return Object.values(readSourceMap());
+		return Object.values(readSourceMap(files));
 	},
 	/** Idempotent per startedAt — same discipline as chats.appendExtractionUsage. */
 	appendSourceUsage(id: string, entry: ExtractionRunUsage): void {
-		const all = readSourceMap();
+		const all = readSourceMap(files);
 		const source = all[id];
 		if (!source) return; // no such source — nothing to bill against
 		source.extractions = source.extractions?.some((r) => r.startedAt === entry.startedAt)
 			? source.extractions
 			: [...(source.extractions ?? []), entry];
-		writeSourceMap(all);
+		writeSourceMap(files, all);
 	},
 
-	// ── the layout ledger (config.POSITIONS_FILE — a JSON map) ──
+	// ── the layout ledger (files.positions — a JSON map) ──
 	readPositions(): Record<string, Position> {
-		return readPositionMap();
+		return readPositionMap(files);
 	},
 	writePositions(positions: Record<string, Position>): void {
-		writePositionMap(positions);
+		writePositionMap(files, positions);
 	},
 
 	/** THE DESTRUCTIVE SEAM (wave 6 session deletion): atomic full-content
@@ -205,14 +248,14 @@ export const graphStore: GraphStore = {
 		coverage?: CoverageEntry[];
 		checkpoints?: SessionCheckpoint[];
 	}): void {
-		const files = {
-			nodes: LEDGER_FILES.nodes,
-			chains: LEDGER_FILES.chains,
-			coverage: LEDGER_FILES.coverage,
-			checkpoints: LEDGER_FILES.sessions,
+		const ledgerFiles = {
+			nodes: files.nodes,
+			chains: files.chains,
+			coverage: files.coverage,
+			checkpoints: files.sessions,
 		} as const;
-		for (const [key, records] of Object.entries(next) as [keyof typeof files, unknown[]][]) {
-			const file = files[key];
+		for (const [key, records] of Object.entries(next) as [keyof typeof ledgerFiles, unknown[]][]) {
+			const file = ledgerFiles[key];
 			fs.mkdirSync(path.dirname(file), { recursive: true });
 			const tmp = `${file}.tmp-${crypto.randomUUID().slice(0, 8)}`;
 			try {
@@ -231,17 +274,26 @@ export const graphStore: GraphStore = {
 			}
 		}
 	},
-};
+	};
+}
+
+
+
+/** The legacy global graph store (decision 9): data/graph/, byte-identical
+ *  to the pre-Phase-4 module export. Read-only for new sessions (Unsorted
+ *  sessions write nothing — docs/workspaces.md); the graph view's
+ *  "Global (legacy)" selector and old-provenance reads ride it. */
+export const graphStore: GraphStore = createGraphStore(LEGACY_GRAPH_FILES);
 
 /** positions.json — { positions, updatedAt }. Read-modify-write, NOT
  *  append-only: the settle is a full-graph computation, so it replaces the
  *  whole map. The updatedAt stamp exists for future live-physics conflict
  *  handling (a browser commit must be able to detect "the graph changed
  *  underneath me"); reads just return the map. */
-function readPositionMap(): Record<string, Position> {
+function readPositionMap(files: GraphFiles): Record<string, Position> {
 	let raw: string;
 	try {
-		raw = fs.readFileSync(POSITIONS_FILE, "utf-8");
+		raw = fs.readFileSync(files.positions, "utf-8");
 	} catch {
 		return {}; // no ledger yet — nothing has ever settled
 	}
@@ -258,15 +310,15 @@ function readPositionMap(): Record<string, Position> {
 	}
 }
 
-function writePositionMap(positions: Record<string, Position>): void {
-	fs.mkdirSync(path.dirname(POSITIONS_FILE), { recursive: true });
+function writePositionMap(files: GraphFiles, positions: Record<string, Position>): void {
+	fs.mkdirSync(path.dirname(files.positions), { recursive: true });
 	// Tmp + rename — the same crash-safety rewriteLedgers uses two blocks
 	// up (a9339b3 UI flag): a torn write must never replace the ledger
 	// with a half-written file the reader parses as empty.
-	const tmp = `${POSITIONS_FILE}.tmp-${crypto.randomUUID().slice(0, 8)}`;
+	const tmp = `${files.positions}.tmp-${crypto.randomUUID().slice(0, 8)}`;
 	try {
 		fs.writeFileSync(tmp, JSON.stringify({ positions, updatedAt: new Date().toISOString() }, null, "\t"), "utf-8");
-		fs.renameSync(tmp, POSITIONS_FILE);
+		fs.renameSync(tmp, files.positions);
 	} catch (err) {
 		try {
 			fs.unlinkSync(tmp);
@@ -282,11 +334,11 @@ const isPosition = (v: unknown): v is Position =>
 
 /** sources.json — { id: NotesSource }. Read-modify-write, NOT append-only:
  *  the usage log lives inside the record (like a chat's JSON file). */
-function readSourceMap(): Record<string, NotesSource> {
-	assertGraphFormat(); // honest refusal on a newer-stamped data dir
+function readSourceMap(files: GraphFiles): Record<string, NotesSource> {
+	assertGraphFormat(files); // honest refusal on a newer-stamped data dir
 	let raw: string;
 	try {
-		raw = fs.readFileSync(SOURCES_FILE, "utf-8");
+		raw = fs.readFileSync(files.sources, "utf-8");
 	} catch {
 		return {};
 	}
@@ -303,17 +355,16 @@ function readSourceMap(): Record<string, NotesSource> {
 	}
 }
 
-function writeSourceMap(map: Record<string, NotesSource>): void {
-	fs.mkdirSync(path.dirname(SOURCES_FILE), { recursive: true });
-	ensureGraphFormat(); // the lazy format stamp (graph-format.ts)
-	fs.writeFileSync(SOURCES_FILE, JSON.stringify(map, null, "\t"), "utf-8");
+function writeSourceMap(files: GraphFiles, map: Record<string, NotesSource>): void {
+	fs.mkdirSync(path.dirname(files.sources), { recursive: true });
+	ensureGraphFormat(files); // the lazy format stamp (graph-format.ts)
+	fs.writeFileSync(files.sources, JSON.stringify(map, null, "\t"), "utf-8");
 }
 
-// ─── one-way purges at adapter load: dead ledgers are exactly the confusion
-// the cleanup removes (owner doctrine — nothing reads them, nothing writes
-// them, a stale file lying around is a lie). ────────────────────────────────
-{
-	const graphDir = path.dirname(LEDGER_FILES.nodes);
+// ─── one-way purges per graph directory at factory creation: dead ledgers
+// are exactly the confusion the cleanup removes (owner doctrine — nothing
+// reads them, nothing writes them, a stale file lying around is a lie). ─────
+function purgeLegacyLedgers(graphDir: string): void {
 	for (const legacy of ["edges.jsonl", "events.jsonl"]) {
 		const file = path.join(graphDir, legacy);
 		try {

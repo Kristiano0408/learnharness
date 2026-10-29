@@ -51,9 +51,9 @@ describe("Nova-3 dictation language contract", () => {
 			assert.equal(parseDictationSettingsBody(value).ok, false);
 		}
 		for (const dictation of [null, [], "pl", { language: "xx" }, { language: 3 }]) {
-			const record = sanitizeUserSettings({ version: 1, dictation, general: { autoUpdate: false } });
+			const record = sanitizeUserSettings({ version: 1, dictation, appearance: { mode: "light" } });
 			assert.equal(resolveSettings(record).dictation.language, "en");
-			assert.equal(record?.general?.autoUpdate, false);
+			assert.equal(record?.appearance?.mode, "light");
 		}
 	});
 });
@@ -65,18 +65,18 @@ const { readSettings, writeSettings } = await import("../src/store/settings.ts")
 
 it("the section route persists language independently and rejects unsupported values without writing", async () => {
 	const { PUT } = await import("../app/api/settings/[section]/route.ts");
-	writeSettings({ version: 1, general: { autoUpdate: false } });
+	writeSettings({ version: 1, appearance: { mode: "dark" } });
 	const put = (language: string) => PUT(new Request("http://localhost/api/settings/dictation", {
 		method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ language }),
 	}), { params: Promise.resolve({ section: "dictation" }) });
 	assert.equal((await put("pl")).status, 200);
-	const saved = { version: 1, dictation: { language: "pl" }, general: { autoUpdate: false } };
+	const saved = { version: 1, dictation: { language: "pl" }, appearance: { mode: "dark" } };
 	assert.deepEqual(readSettings(), saved);
 	assert.equal((await put("unsupported")).status, 400);
 	assert.deepEqual(readSettings(), saved);
 	const general = await PUT(new Request("http://localhost/api/settings/general", {
-		method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ autoUpdate: true }),
+		method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}),
 	}), { params: Promise.resolve({ section: "general" }) });
 	assert.equal(general.status, 200);
-	assert.deepEqual(readSettings(), { ...saved, general: { autoUpdate: true } }, "auto-update cannot erase dictation language");
+	assert.deepEqual(readSettings(), { ...saved, general: {} }, "general write cannot erase dictation language");
 });

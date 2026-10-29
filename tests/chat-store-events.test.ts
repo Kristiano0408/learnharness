@@ -39,8 +39,13 @@ describe("chat store events (S6: the silence law)", () => {
 		chatStore.renameChat(chat.id, "Renamed");
 		assert.equal(announces, 2, "rename announces (a list-shape write)");
 
+		// moveChat (workspace wave, 2026-10-28): the sidebar's grouping
+		// changes — a list-SHAPE mutation, announces like the others.
+		chatStore.moveChat(chat.id, "ws_pin");
+		assert.equal(announces, 3, "a workspace move announces (a list-shape write)");
+
 		assert.equal(chatStore.deleteChat(chat.id), true);
-		assert.equal(announces, 3, "a real delete announces");
+		assert.equal(announces, 4, "a real delete announces");
 		off();
 	});
 

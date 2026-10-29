@@ -25,6 +25,7 @@ import type {
 	SessionCheckpoint,
 	TurnUsage,
 	NotesSource,
+	WorkspaceRecord,
 } from "./contracts.ts";
 import type { UserSettings } from "./settings.ts";
 
@@ -33,8 +34,11 @@ import type { UserSettings } from "./settings.ts";
 export interface ChatStore {
 	/** Create a session record (persisted immediately). */
 	/** Create a session record; kind "practice" marks a practice session
-	 *  (absent = teach, the default). */
-	createChat(title: string, kind?: "practice"): ChatRecord;
+	 *  (absent = teach, the default). workspaceId (workspace wave,
+	 *  2026-10-28) files the newborn under a workspace — absent = Unsorted
+	 *  (the store does NOT validate the workspace exists; the route gate
+	 *  does, same split as every other validation). */
+	createChat(title: string, kind?: "practice", workspaceId?: string): ChatRecord;
 	/** The full record, or null if unknown id / corrupt file. */
 	getChat(id: string): ChatRecord | null;
 	/** All sessions, newest activity first (the sidebar's list view). */
@@ -58,6 +62,13 @@ export interface ChatStore {
 	 * Like saveSettings: a rename is NOT conversation activity — updatedAt
 	 * stays put, so sidebar order never churns on a rename. */
 	renameChat(id: string, title: string): ChatRecord;
+	/** Move a session between workspaces (workspace wave, 2026-10-28,
+	 *  docs/workspaces.md Phase 2): sets workspaceId, or clears it (null =
+	 *  Unsorted). A list-SHAPE mutation — it announces chats-changed. Like
+	 *  a rename it is NOT conversation activity: updatedAt stays put. The
+	 *  graph-trace transport (mode=move-nodes) is the route's choreography
+	 *  (Phase 5), not the store's. */
+	moveChat(id: string, workspaceId: string | null): ChatRecord;
 	/** Delete the session record entirely (session-deletion wave 6, owner
 	 *  2026-09-22). False when the id is unknown. The graph-ledger purge and
 	 *  job cleanup are the caller's choreography (core/graph-deletion.ts +
@@ -74,6 +85,11 @@ export interface ChatStore {
 // stays.
 
 export interface GraphStore {
+	/** THE refusal marker (workspace wave Phase 4, decision 9): the
+	 *  composition root's refusing no-op store sets this — the extraction
+	 *  seam recognizes a refused destination structurally, never by probing
+	 *  writes or comparing function identity. */
+	refused?: boolean;
 	/** Append one GraphNode (ids are unique — no merging needed). */
 	appendNode(node: GraphNode): void;
 	/** Raw node lines in append order. */
@@ -158,6 +174,34 @@ export interface JobStore {
 	 *  route refuses while jobs are still running, so by the time this
 	 *  fires every record is terminal. */
 	deleteJobsForChat(chatId: string): number;
+}
+
+// ─── WorkspaceStore — the session-grouping containers (workspace wave, 2026-10-28) ──
+
+/**
+ * One record per workspace (core/contracts/workspace.ts WorkspaceRecord),
+ * data/workspaces/<id>/meta.json — read-modify-write like a chat file.
+ * A workspace groups sessions and owns its own graph directory (the graph
+ * seam lands in Phase 4, docs/workspaces.md); sessions without a workspaceId
+ * are "Unsorted". The store never sees chats: sessionCount is a route-side
+ * fold (import law — the workspace store never imports the chat store).
+ */
+export interface WorkspaceStore {
+	/** Create a workspace record (persisted immediately). */
+	createWorkspace(name: string): WorkspaceRecord;
+	/** The full record, or null if unknown id / corrupt file / newer stamp. */
+	getWorkspace(id: string): WorkspaceRecord | null;
+	/** All workspaces, oldest first (createdAt — a stable sidebar order;
+	 *  activity ordering is the chat list's job, not this one's). */
+	listWorkspaces(): WorkspaceRecord[];
+	/** Rename a workspace. Like renameChat: NOT activity — updatedAt stays
+	 *  put. Empty-after-trim falls back to "Untitled workspace". */
+	renameWorkspace(id: string, name: string): WorkspaceRecord;
+	/** Delete the workspace record directory entirely. False when the id is
+	 *  unknown. v1: the ROUTE refuses a non-empty workspace (409, Phase 2) —
+	 *  the store deletes what it is asked to delete; session orphaning is
+	 *  the caller's choreography, not the store's. */
+	deleteWorkspace(id: string): boolean;
 }
 
 // ─── SettingsStore — THE user settings record (settings-storage wave, 2026-09-19) ──

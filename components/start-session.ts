@@ -3,6 +3,10 @@ import { clearOpeningPrompt, OPENING_PROMPT_FAILURE, stashOpeningPrompt } from "
 interface SessionCreation {
 	title: string;
 	kind?: "practice";
+	/** The draft's filing (workspace wave Phase 3, docs/workspaces.md):
+	 *  a workspace id — the created session rides it on the POST body;
+	 *  absent = Unsorted. */
+	workspaceId?: string;
 	graphContext?: { propositions: readonly { id: string; name: string; statement: string }[] };
 }
 

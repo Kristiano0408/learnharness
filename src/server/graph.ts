@@ -1,5 +1,5 @@
 import * as fs from "node:fs";
-import { LEDGER_FILES, POSITIONS_FILE } from "../../config.ts";
+import { PATHS, graphFilesForDir, workspaceGraphDir } from "../../config.ts";
 import type { GraphSnapshot } from "../core/contracts.ts";
 import type { GraphCostSummary } from "../core/cost-summary.ts";
 import { graphCostSummary } from "../core/cost-summary.ts";
@@ -10,17 +10,62 @@ import {
 	type NodeDeletionStats,
 } from "../core/graph-deletion.ts";
 import { extractionStatuses } from "../agent/subagents/extraction.ts";
-import { stores } from "./stores.ts";
+import { graphStoresForChat, stores } from "./stores.ts";
+import type { GraphStore } from "../core/ports.ts";
 import { callCost } from "./pricing.ts";
+
+// ─── the honest empty read (Phase 6) ──────────────────────────────────────────
+
+/** THE refusing no-op read shape — the composition root's refused-store reads
+ *  are empty ("nothing yet"), writes refuse loudly. An unknown-but-valid
+ *  workspace id rides the same honest emptiness on the READ band; a write
+ *  through this shape can't happen here (reads only). Exported nowhere: it
+ *  exists to keep every scoped read total. */
+function refusedReadStore(): GraphStore {
+	const refuse = (): never => {
+		throw new Error("unknown workspace — no graph to serve");
+	};
+	return {
+		refused: true,
+		appendNode: refuse,
+		appendChain: refuse,
+		appendCheckpoint: refuse,
+		appendCoverage: refuse,
+		upsertSource: refuse,
+		appendSourceUsage: refuse,
+		writePositions: refuse,
+		rewriteLedgers: refuse,
+		readNodes: () => [],
+		readChains: () => [],
+		readCheckpoints: () => [],
+		readCoverage: () => [],
+		readSources: () => [],
+		readPositions: () => ({}),
+	};
+}
 
 /**
  * Server-side graph entry for the home view (GET /api/graph). A PURE READ:
  * the extraction pipeline (the sole graph writer) is triggered by quiz
  * answers in sessions (turn-service), never from here — the home view
  * reflects whatever the pipeline has merged so far.
+ *
+ * THE WORKSPACE SELECTOR (Phase 6, decision C1): undefined/"global" = the
+ * legacy global graph (data/graph/, today's default); a workspace id = that
+ * workspace's own ledgers. An unknown id reads as an empty graph — honest
+ * "nothing yet" (the route gates 404 before this call).
  */
-export function graphView(): GraphSnapshot {
-	return graphSnapshot(stores);
+/** THE graph store for one workspace selector on the READ band: absent/"global"
+ *  = legacy; a known workspace = its own store; an unknown-but-valid id = the
+ *  honest empty read (never a throw — the route's syntactic gate and this
+ *  existence gate together keep every scoped read total). */
+function scopedReadStore(workspaceId: string | undefined): GraphStore {
+	if (workspaceId === undefined || workspaceId === "global") return stores.graphStore;
+	return stores.workspaceStore.getWorkspace(workspaceId) ? graphStoresForChat.forWorkspace(workspaceId) : refusedReadStore();
+}
+
+export function graphView(workspaceId?: string): GraphSnapshot {
+	return graphSnapshot({ chatStore: stores.chatStore, graphStore: scopedReadStore(workspaceId) });
 }
 
 /** The graph view's cost surface (GET /api/graph/costs — the 2026-09 cost
@@ -29,7 +74,7 @@ export function graphView(): GraphSnapshot {
  *  (notes-front-door runs), and the naming ledger (graph-global runs);
  *  dollars are inferred by the pure core fold (core/cost-summary.ts +
  *  prices.ts) — nothing here stores or caches money. */
-export function graphCosts(): GraphCostSummary {
+export function graphCosts(workspaceId?: string): GraphCostSummary {
 	const chats = stores.chatStore
 		.listChats()
 		.flatMap((summary) => {
@@ -38,7 +83,8 @@ export function graphCosts(): GraphCostSummary {
 				? [{ title: record.title ?? summary.id, extractions: record.extractions }]
 				: [];
 		});
-	const sources = stores.graphStore
+	const graph = scopedReadStore(workspaceId);
+	const sources = graph
 		.readSources()
 		.filter((s) => s.extractions?.length)
 		.map((s) => ({ filePath: s.filePath, extractions: s.extractions! }));
@@ -51,15 +97,26 @@ export function graphCosts(): GraphCostSummary {
  * never moves on reads, and needs no bookkeeping of its own: the fs
  * IS the counter. Consumers poll it (the activity feed
  *  carries it; the DELETE response returns it) to know clusters/layout
- *  must refetch — the "graph changed underneath me" signal. */
-export function graphRevision(): number {
+ *  must refetch — the "graph changed underneath me" signal.
+ *
+ * THE WORKSPACE SELECTOR (Phase 6): absent/"global" = the legacy global
+ * graph's stamp (today's default, byte-identical pre-Phase-6 behavior);
+ * a workspace id = that workspace directory's stamp. An unknown id reads
+ * 0 — honest "nothing yet". */
+export function graphRevision(scope?: string): number {
+	// THE WORKSPACE SELECTOR (Phase 6): absent = the legacy global graph's
+	// stamp (today's default, byte-identical pre-Phase-6 behavior); a
+	// workspace id = that workspace directory's stamp. An unknown id reads 0
+	// — honest "nothing yet".
+	const dir = scope === undefined ? PATHS.graph : workspaceGraphDir(scope);
+	const files = graphFilesForDir(dir);
 	let revision = 0;
 	for (const file of [
-		LEDGER_FILES.nodes,
-		LEDGER_FILES.chains,
-		LEDGER_FILES.sessions,
-		LEDGER_FILES.coverage,
-		POSITIONS_FILE,
+		files.nodes,
+		files.chains,
+		files.sessions,
+		files.coverage,
+		files.positions,
 	]) {
 		try {
 			revision = Math.max(revision, fs.statSync(file).mtimeMs);
@@ -101,7 +158,7 @@ export type NodeDeleteOutcome =
  *     mergeFindings ignores linkTo ids that no longer exist (the
  *     existingIds guard) — no dangling edges, no resurrection.
  */
-export function deleteGraphNode(nodeId: string): NodeDeleteOutcome {
+export function deleteGraphNode(nodeId: string, workspaceId?: string): NodeDeleteOutcome {
 	if (extractionStatuses().length > 0) {
 		return {
 			ok: false,
@@ -112,10 +169,15 @@ export function deleteGraphNode(nodeId: string): NodeDeleteOutcome {
 	}
 	// THE SYNC BLOCK — no awaits below (the doc above): the gate and the
 	// rewrite are one atomic stretch of the event loop.
-	const stats = deleteNodeTraces(stores.graphStore, nodeId);
+	// THE WORKSPACE SELECTOR (Phase 6): the node dies in the graph directory
+	// the view is showing — absent/legacy = data/graph/ (today's default),
+	// workspace id = that workspace's ledgers. An unknown-but-valid id reads
+	// the honest empty store: no node there → the 404 below, never a throw.
+	const graph = scopedReadStore(workspaceId);
+	const stats = deleteNodeTraces(graph, nodeId);
 	if (stats === null) {
 		return { ok: false, status: 404, code: "not_found", error: "No such node" };
 	}
-	return { ok: true, stats, graphRevision: graphRevision() };
+	return { ok: true, stats, graphRevision: graphRevision(workspaceId) };
 }
 

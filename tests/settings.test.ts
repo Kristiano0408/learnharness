@@ -20,7 +20,7 @@ import {
 describe("FACTORY_SETTINGS (the compiled factory layer)", () => {
 	it("pins the owner-decided defaults", () => {
 		assert.equal(CURRENT_SETTINGS_VERSION, 1);
-		assert.deepEqual(FACTORY_SETTINGS.general, { autoUpdate: true });
+		assert.deepEqual(FACTORY_SETTINGS.general, {});
 		// wave 7 collapse: the master switch ONLY + the extraction-UX
 		// redesign's chunk budget (2026-09-24); doubled to 8192 with the
 		// digest-aware redesign (2026-09-30), then HALVED BACK to 4096
@@ -56,7 +56,7 @@ describe("sanitizeUserSettings", () => {
 	it("round-trips a fully valid record field-for-field", () => {
 		const record = {
 			version: 1,
-			general: { autoUpdate: false },
+			general: {},
 			agent: {
 				models: {
 					researcher: { model: { provider: "openrouter", id: "qwen/qwen3.8-flash" }, thinkingLevel: "high" },
@@ -90,11 +90,11 @@ describe("sanitizeUserSettings", () => {
 	});
 
 	it("absent version defaults to CURRENT; unknown keys ride along VERBATIM", () => {
-		const out = sanitizeUserSettings({ futureSection: { knob: 3 }, general: { autoUpdate: true } });
+		const out = sanitizeUserSettings({ futureSection: { knob: 3 }, general: {} });
 		assert.ok(out);
 		assert.equal(out.version, CURRENT_SETTINGS_VERSION);
 		assert.deepEqual((out as Record<string, unknown>).futureSection, { knob: 3 });
-		assert.deepEqual(out.general, { autoUpdate: true });
+		assert.deepEqual(out.general, {});
 	});
 
 	it("wrong-typed fields DROP (resolve to factory), never crash", () => {

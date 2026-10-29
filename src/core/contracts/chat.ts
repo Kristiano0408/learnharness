@@ -35,6 +35,13 @@ export interface ChatRecord {
 	messages: LhMessage[];
 	/** The session's kind — absent = teach (pre-practice records). */
 	kind?: ChatKind;
+	/** The session's workspace (workspace wave, owner 2026-10-28,
+	 *  docs/workspaces.md): a workspace groups sessions and owns its own
+	 *  graph. ABSENT = "Unsorted" — pre-workspace records never migrate
+	 *  (absence reads as Unsorted, the same regime as `kind`), and an
+	 *  Unsorted session has no graph destination (the legacy global graph
+	 *  at data/graph/ stays where it is, decision 9). */
+	workspaceId?: string;
 	/** The session's plan tree (vision §2) — written by plan tools via saveTree. */
 	tree?: PlanTree;
 	/** Append-only usage log (observability, 2026-09): one entry per model
@@ -263,6 +270,9 @@ export interface ChatSummary {
 	updatedAt: string;
 	/** Normalized kind (absent record field reads as teach). */
 	kind: ChatKind;
+	/** The session's workspace — ABSENT = Unsorted (the record field rides
+	 *  the summary spread; the sidebar groups on it, docs/workspaces.md). */
+	workspaceId?: string;
 	messageCount: number;
 	/** The session's current phase, derived from the stored plan tree. */
 	phase: Phase3;

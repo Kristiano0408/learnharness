@@ -30,7 +30,7 @@ import {
 import { runPiTurn } from "./pi/ui-stream.ts";
 import { collectToolCallIds } from "./pi/call-ids.ts";
 import { providerEventNote } from "../agent/provider-events.ts";
-import { effectiveSettings, stores } from "./stores.ts";
+import { effectiveSettings, graphStoreForChatRead, graphStoresForChat, stores } from "./stores.ts";
 import { searchAvailable, searchProvider } from "./search.ts";
 import { providerKeyPresent } from "./keys.ts";
 import {
@@ -111,6 +111,11 @@ const jobRunner = createJobRunner({
  *  (/api/graph/import) hit the same single-flight registry. */
 export const extraction = createExtractionPipeline({
 	...stores,
+	// THE WORKSPACE GRAPH SEAM (Phase 4, docs/workspaces.md): every chat run
+	// resolves its graph store from the session's workspaceId — fresh record
+	// read; Unsorted sessions ride the composition root's refusing no-op.
+	resolveGraphStoreForChat: (chatId) => graphStoresForChat.forChat(chatId),
+	resolveGraphStoreForWorkspace: (workspaceId) => graphStoresForChat.forWorkspace(workspaceId),
 	// BYOK (owner, 2026-09-22): the extraction stages resolve the chain —
 	// role override → slot → NOTHING — read FRESH per stage call; an empty
 	// chain flows through as undefined and the pipeline refuses the run
@@ -454,7 +459,7 @@ export async function handleChatInput(
 						// WHOLE graph fresh per pose — targets validate against every
 						// proposition, not just the session's picks (pickless sessions
 						// and future graph-tools poses stay valid).
-						graphNodes: () => stores.graphStore.readNodes(),
+						graphNodes: () => graphStoreForChatRead(chatId)?.readNodes() ?? stores.graphStore.readNodes(),
 						// THE RARELY-NEEDED SET (owner round 10): research + pdf jobs
 						// (same runner/gating as the teacher's — research honestly
 						// absent when no engine is live) and the map readers behind
@@ -465,7 +470,7 @@ export async function handleChatInput(
 							spawn: (job, input) => void jobRunner.runJob(job.id, input),
 							searchAvailable,
 						},
-						...(graphToolsEnabled(effective) ? { graph: { chatStore: stores.chatStore, graphStore: stores.graphStore } } : {}),
+						...(graphToolsEnabled(effective) ? { graph: { chatStore: stores.chatStore, graphStore: graphStoreForChatRead(chatId) ?? stores.graphStore } } : {}),
 					},
 					agentOpts,
 				)
@@ -496,7 +501,7 @@ export async function handleChatInput(
 						// The map reader (wave 7): the prober reads the learner's
 						// knowledge graph through tools when the gate opens —
 						// graph master switch AND the agent.graphTools toggle.
-						...(graphToolsEnabled(effective) ? { graphStore: stores.graphStore } : {}),
+						...(graphToolsEnabled(effective) ? { graphStore: graphStoreForChatRead(chatId) ?? stores.graphStore } : {}),
 					},
 					agentOpts,
 				);
@@ -589,7 +594,7 @@ export async function handleChatInput(
 					// Fresh per-turn read of the graph section's chunk budget
 					// (extraction-UX redesign, 2026-09-24): the trigger compares
 					// against it and the pipeline's batches share it.
-					triggerExtraction(stores, extraction, chatId, effective.graph.extractionChunkTokens);
+					triggerExtraction({ ...stores, graphStores: graphStoresForChat }, extraction, chatId, effective.graph.extractionChunkTokens);
 				}
 				// PARKED DISMISSAL (owner, 2026-10-04): a dismissal that arrived
 				// mid-turn was parked by the dismiss route (202); now that

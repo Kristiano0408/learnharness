@@ -1,3 +1,4 @@
+import { WORKSPACE_ID_PATTERN } from "@/config";
 import { deleteGraphNode } from "@/src/server";
 
 /**
@@ -17,9 +18,15 @@ import { deleteGraphNode } from "@/src/server";
  * synchronous end to end — nothing interleaves. The response carries what
  * was removed plus the new graphRevision (the refetch signal).
  */
-export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function DELETE(req: Request, { params }: { params: Promise<{ id: string }> }) {
 	const { id } = await params;
-	const outcome = deleteGraphNode(id);
+	// THE WORKSPACE SELECTOR (Phase 6): absent or "global" = the legacy
+	// global graph (today's default); a workspace id = that workspace graph.
+	const raw = new URL(req.url).searchParams.get("workspace");
+	if (raw !== null && raw !== "global" && !WORKSPACE_ID_PATTERN.test(raw)) {
+		return Response.json({ error: "Unknown workspace", code: "unknown_workspace" }, { status: 404 });
+	}
+	const outcome = deleteGraphNode(id, raw ?? undefined);
 	if (!outcome.ok) {
 		return Response.json({ error: outcome.error, code: outcome.code }, { status: outcome.status });
 	}

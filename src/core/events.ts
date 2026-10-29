@@ -38,6 +38,10 @@ export interface ServerEvents {
 	"activity-changed": Record<string, never>;
 	/** The session list changed (create, delete, title). */
 	"chats-changed": Record<string, never>;
+	/** The workspace list changed (create, rename, delete — the same
+	 *  list-SHAPE discipline as chats-changed: content writes stay silent).
+	 *  Workspace wave, 2026-10-28 (docs/workspaces.md). */
+	"workspaces-changed": Record<string, never>;
 	/** Web subscription state changed. No account or credential data on the bus. */
 	"subscriptions-changed": Record<string, never>;
 	/** A chat's record changed WITHOUT a turn (the silent dismissal write).
@@ -63,6 +67,7 @@ export const SERVER_EVENT_TYPES = [
 	"jobs-changed",
 	"activity-changed",
 	"chats-changed",
+	"workspaces-changed",
 	"subscriptions-changed",
 	"record-changed",
 	"compaction-changed",

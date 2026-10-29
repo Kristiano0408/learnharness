@@ -5,8 +5,20 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { MenuShell } from "@/components/menu-shell";
 import { DeleteSessionDialog } from "@/components/delete-session-dialog";
+import { MoveSessionDialog } from "@/components/move-session-dialog";
 import type { ChatDeleteMode } from "@/src/core";
-import { DumbbellIcon, PanelLeftCloseIcon, PanelLeftOpenIcon, PlusIcon, SearchIcon, SettingsIcon } from "lucide-react";
+import {
+	ChevronRightIcon,
+	DumbbellIcon,
+	FolderPlusIcon,
+	PanelLeftCloseIcon,
+	PanelLeftOpenIcon,
+	PencilIcon,
+	PlusIcon,
+	SearchIcon,
+	SettingsIcon,
+	Trash2Icon,
+} from "lucide-react";
 import { ActivitySection } from "@/components/activity-dock";
 import { CoverageMenuBlock } from "@/components/extraction-coverage";
 import { LhMark } from "@/components/lh-mark";
@@ -49,7 +61,6 @@ const STORAGE_KEY = "lh:sidebar-open";
  * Mirrors SIDEBAR_AUTOCLOSE in electron/main.cjs — keep in sync.
  */
 import type { ChatGPTControlBridge, NativeSubscriptionControlBridge } from "@/src/core";
-import type { UpdateState } from "@/components/settings/update-settings.tsx";
 const SIDEBAR_AUTOCLOSE = 928;
 
 // Module scope, guarded for SSR (the server has no navigator).
@@ -70,12 +81,6 @@ declare global {
 			/** The zoom truth (owner round 7): subscribes to "lh:zoom" pushes; returns unsubscribe. */
 			onZoom?: (cb: (factor: number) => void) => () => void;
 			getZoom?: () => Promise<number>;
-			/** Observational update events and a snapshot for late subscribers. */
-			onUpdateStatus?: (cb: (status: UpdateState) => void) => () => void;
-			getUpdateState?: () => Promise<UpdateState>;
-			/** Explicit manual check also downloads and stages available updates. */
-			checkForUpdates?: () => Promise<void>;
-			installUpdate?: () => void;
 			onOpenSettings?: (cb: (section: string) => void) => () => void;
 		};
 	}
@@ -381,23 +386,251 @@ export function RenameRow({ chat, onCommit, onCancel }: { chat: ChatListItem; on
 }
 
 /** The three-way kind filter (practice sessions, owner 2026-10-04):
- *  Teaching / All / Practice — a client-side filter over the same
- *  snapshot, persisted in localStorage, defaulting to All. */
-export type SessionKindFilter = "teach" | "all" | "practice";
+ *  Teaching / All / Practice — a client-side filter, persisted in
+ *  localStorage. Workspace wave Phase 3 (owner decision 4C, 2026-10-28):
+ *  the filter is PER WORKSPACE — the persisted value is a sectionKey →
+ *  filter map (the "*" default entry + per-section overrides; the legacy
+ *  bare string migrates lazily on read). The fold + map helpers live in
+ *  core (workspace-groups.ts); the type re-exports from there. */
+export type { SessionKindFilter } from "@/src/core";
+import {
+	FILTER_DEFAULT_KEY,
+	UNSORTED_KEY,
+	filterChatsByKind,
+	groupChatsByWorkspace,
+	kindFilterFor,
+	readKindFilters,
+	withKindFilter,
+	writeKindFilters,
+	type SessionKindFilter,
+	type WorkspaceListItem,
+} from "@/src/core";
 const KIND_FILTER_KEY = "lh:session-kind-filter";
+/** Collapsed workspace sections (id → true). Unsorted is never collapsed
+ *  (it is the fallback home, not a workspace the learner curated). */
+const COLLAPSED_KEY = "lh:workspace-collapsed";
+
+/** The per-section kind-filter row (Teaching / Practice / All — the same
+ *  three-way design as the pre-workspace global row, scoped to one
+ *  section). Only rendered when the section is open. */
+export function KindFilterRow({ sectionKey, filter, onFilter }: { sectionKey: string; filter: SessionKindFilter; onFilter: (f: SessionKindFilter) => void }) {
+	return (
+		<div className="mx-3 mt-1 flex items-center gap-0.5 rounded-md border border-border/60 bg-background p-0.5" data-testid={`kind-filter-${sectionKey}`}>
+			{(["teach", "practice", "all"] as const).map((f) => (
+				<button
+					key={f}
+					type="button"
+					data-testid={`kind-filter-${sectionKey}-${f}`}
+					onClick={() => onFilter(f)}
+					className={cn(
+						"flex-1 rounded-sm px-2 py-1 text-[11px] uppercase tracking-wider transition-colors",
+						filter === f
+							? "bg-accent text-foreground"
+							: "text-muted-foreground hover:text-foreground",
+					)}
+				>
+					{f === "teach" ? "Teaching" : f === "all" ? "All" : "Practice"}
+				</button>
+			))}
+		</div>
+	);
+}
+
+/** The workspace section header: caret (collapse), name (click-to-rename
+ *  inline, the RenameRow's rules), the busy spinner (a section owns a
+ *  running turn), session count. The Unsorted section carries no rename/
+ *  delete — it is a fallback grouping, not a record. */
+export function WorkspaceSectionHeader({
+	section,
+	collapsed,
+	busyCount,
+	onToggle,
+	onRename,
+	onDelete,
+}: {
+	section: { key: string; name: string; workspaceId: string | null; chats: { length: number } };
+	collapsed: boolean;
+	busyCount: number;
+	onToggle: () => void;
+	onRename: () => void;
+	onDelete: () => void;
+}) {
+	const isUnsorted = section.workspaceId === null;
+	return (
+		<div className="group/section mt-1.5 flex items-center gap-1 px-2" data-testid={`workspace-section-${section.key}`}>
+			<button
+				type="button"
+				data-testid={`workspace-collapse-${section.key}`}
+				onClick={onToggle}
+				aria-expanded={!collapsed}
+				aria-label={collapsed ? `Expand ${section.name}` : `Collapse ${section.name}`}
+				className="flex size-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+			>
+				<ChevronRightIcon className={cn("size-3.5 transition-transform duration-150", !collapsed && "rotate-90")} />
+			</button>
+			<button
+				type="button"
+				data-testid={`workspace-name-${section.key}`}
+				onClick={onRename}
+				className="min-w-0 flex-1 truncate rounded-sm px-1 py-0.5 text-left font-prose text-(length:--lh-prose-size) text-foreground transition-colors hover:bg-accent"
+			>
+				{section.name}
+			</button>
+			{busyCount > 0 && <BrailleSpinner />}
+			{section.chats.length > 0 && (
+				<span className="shrink-0 text-[11px] tabular-nums text-muted-foreground/70">{section.chats.length}</span>
+			)}
+			{!isUnsorted && (
+				<span className="flex shrink-0 items-center opacity-0 transition-opacity group-hover/section:opacity-100">
+					<button
+						type="button"
+						data-testid={`workspace-rename-${section.key}`}
+						onClick={onRename}
+						aria-label={`Rename workspace ${section.name}`}
+						className="flex size-5 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+					>
+						<PencilIcon className="size-3" />
+					</button>
+					<button
+						type="button"
+						data-testid={`workspace-delete-${section.key}`}
+						onClick={onDelete}
+						aria-label={`Delete workspace ${section.name}`}
+						className="flex size-5 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+					>
+						<Trash2Icon className="size-3" />
+					</button>
+				</span>
+			)}
+		</div>
+	);
+}
+
+/** The inline workspace-rename row (the RenameRow's rules: select-all
+ *  entry, Enter/blur commits, Esc discards, empty commit discards). */
+export function WorkspaceRenameRow({ name, onCommit, onCancel }: { name: string; onCommit: (next: string) => void; onCancel: () => void }) {
+	const [draft, setDraft] = useState(name);
+	const inputRef = useRef<HTMLInputElement | null>(null);
+	useEffect(() => {
+		const el = inputRef.current;
+		if (el) {
+			el.focus();
+			el.select();
+		}
+	}, []);
+	return (
+		<div data-testid="workspace-rename-row" className="mt-1.5 flex w-full items-center rounded-lg bg-accent px-2 py-1.5">
+			<input
+				ref={inputRef}
+				value={draft}
+				spellCheck={false}
+				onChange={(e) => setDraft(e.target.value)}
+				onBlur={() => onCommit(draft)}
+				onKeyDown={(e) => {
+					if (e.key === "Enter") e.currentTarget.blur();
+					if (e.key === "Escape") {
+						e.stopPropagation(); // discard, not also the sidebar/chat chains
+						onCancel();
+					}
+				}}
+				aria-label="Rename workspace"
+				data-testid="workspace-rename-input"
+				className="lh-input w-full min-w-0 truncate border-0 border-b border-border bg-transparent px-1 text-foreground outline-none"
+			/>
+		</div>
+	);
+}
+
+/** The tiny delete confirmation (the danger-fence law: destructive last,
+ *  explicit, no silent cascade — the server's 409 not_empty is the belt). */
+export function WorkspaceDeleteConfirm({ name, onConfirm, onCancel }: { name: string; onConfirm: () => void; onCancel: () => void }) {
+	return (
+		<div data-testid="workspace-delete-confirm" className="mt-1.5 flex items-center gap-2 rounded-lg border border-border/60 bg-card px-2 py-1.5 text-xs">
+			<span className="min-w-0 flex-1 truncate text-muted-foreground">Delete workspace “{name}”?</span>
+			<button type="button" data-testid="workspace-delete-cancel" onClick={onCancel} className="rounded-sm px-2 py-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
+				Cancel
+			</button>
+			<button type="button" data-testid="workspace-delete-confirm-button" onClick={onConfirm} className="rounded-sm px-2 py-1 text-destructive transition-colors hover:bg-accent">
+				Delete
+			</button>
+		</div>
+	);
+}
+
+/** The inline "+ New workspace" row (the RenameRow's geometry — the name
+ *  is the whole form; Enter creates, Esc discards, empty discards). */
+export function NewWorkspaceRow({ onCommit, onCancel }: { onCommit: (name: string) => void; onCancel: () => void }) {
+	const [draft, setDraft] = useState("");
+	const inputRef = useRef<HTMLInputElement | null>(null);
+	useEffect(() => {
+		inputRef.current?.focus();
+	}, []);
+	return (
+		<div data-testid="new-workspace-row" className="mx-3 mt-1.5 flex items-center gap-1 rounded-lg border border-border/60 bg-background px-2 py-1.5">
+			<input
+				ref={inputRef}
+				value={draft}
+				spellCheck={false}
+				placeholder="Workspace name"
+				onChange={(e) => setDraft(e.target.value)}
+				onKeyDown={(e) => {
+					if (e.key === "Enter") {
+						const t = draft.trim();
+						if (t) onCommit(t);
+					}
+					if (e.key === "Escape") {
+						e.stopPropagation(); // the one-Esc law: not the window chain
+						onCancel();
+					}
+				}}
+				aria-label="New workspace name"
+				data-testid="new-workspace-input"
+				className="lh-input w-full min-w-0 border-0 bg-transparent text-foreground outline-none placeholder:text-muted-foreground/60"
+			/>
+		</div>
+	);
+}
 
 function SessionsSidebar() {
 	const { open, toggle } = useSidebar();
 	const [chats, setChats] = useState<ChatListItem[] | null>(null);
+	const [workspaces, setWorkspaces] = useState<WorkspaceListItem[]>([]);
 	const [query, setQuery] = useState("");
-	const [kindFilter, setKindFilter] = useState<SessionKindFilter>("all");
+	const [kindFilters, setKindFilters] = useState<Record<string, SessionKindFilter>>({});
+	const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+	const [creatingWorkspace, setCreatingWorkspace] = useState(false);
+	const [renamingWorkspaceId, setRenamingWorkspaceId] = useState<string | null>(null);
+	const [deletingWorkspaceId, setDeletingWorkspaceId] = useState<string | null>(null);
+	const [movingChat, setMovingChat] = useState<ChatListItem | null>(null);
 	useEffect(() => {
-		const stored = window.localStorage.getItem(KIND_FILTER_KEY);
-		if (stored === "teach" || stored === "all" || stored === "practice") setKindFilter(stored);
+		setKindFilters(readKindFilters(window.localStorage.getItem(KIND_FILTER_KEY)));
+		try {
+			const raw = window.localStorage.getItem(COLLAPSED_KEY);
+			const parsed: unknown = raw === null ? {} : JSON.parse(raw);
+			if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+				const out: Record<string, boolean> = {};
+				for (const [key, value] of Object.entries(parsed)) if (value === true) out[key] = true;
+				setCollapsed(out);
+			}
+		} catch {
+			/* corrupt → nothing collapsed */
+		}
 	}, []);
-	const setFilter = useCallback((f: SessionKindFilter) => {
-		setKindFilter(f);
-		window.localStorage.setItem(KIND_FILTER_KEY, f);
+	const setFilter = useCallback((sectionKey: string, f: SessionKindFilter) => {
+		setKindFilters((prev) => {
+			const next = withKindFilter(prev, sectionKey, f);
+			window.localStorage.setItem(KIND_FILTER_KEY, writeKindFilters(next));
+			return next;
+		});
+	}, []);
+	const toggleCollapsed = useCallback((sectionKey: string) => {
+		setCollapsed((prev) => {
+			const next = { ...prev };
+			if (next[sectionKey]) delete next[sectionKey];
+			else next[sectionKey] = true;
+			window.localStorage.setItem(COLLAPSED_KEY, JSON.stringify(next));
+			return next;
+		});
 	}, []);
 	const pathname = usePathname();
 	const router = useRouter();
@@ -405,7 +638,9 @@ function SessionsSidebar() {
 
 	/* New session (owner, 2026-09-13): NO POST — the button opens the
 	   sessionless draft view; the session is created only when the first
-	   message is sent (and that message becomes its title). Search: a
+	   message is sent (and that message becomes its title). Workspace wave
+	   Phase 3: the draft carries the filing chip (default = the last
+	   picked workspace, localStorage; absent = Unsorted). Search: a
 	   client-side filter over the poll snapshot — no server round trip. */
 	const newSession = useCallback(() => {
 		router.push("/chat/new");
@@ -413,21 +648,34 @@ function SessionsSidebar() {
 
 	/* FUZZY (owner round 8, 2026-10-05): subsequence match ranked by
 	 * fuzzyScore — prefix beats word-boundary beats scattered. Empty query
-	 * keeps the natural list order (scores are all 0, sort is stable). */
-	const shown = useMemo(() => {
+	 * keeps the natural list order (scores are all 0, sort is stable).
+	 * Workspace wave (decision 4C): the kind filter is PER SECTION; a live
+	 * query FLATTENS the sections (the query wins over the structure —
+	 * the quick-open pattern stays one flat walked list). */
+	const sections = useMemo(
+		() => (chats === null ? null : groupChatsByWorkspace(chats, workspaces)),
+		[chats, workspaces],
+	);
+	const flat = useMemo(() => {
+		if (chats === null) return null;
 		const q = query.trim();
-		let list = chats;
-		if (list && kindFilter !== "all") {
-			list = list.filter((c) => (c.kind ?? "teach") === kindFilter);
-		}
-		if (!list) return list;
-		if (!q) return list;
-		return list
+		if (!q) return null;
+		return chats
 			.map((c) => ({ c, score: fuzzyScore(q, c.title) }))
-			.filter((r): r is { c: (typeof list)[number]; score: number } => r.score !== null)
+			.filter((r): r is { c: ChatListItem; score: number } => r.score !== null)
 			.sort((a, b) => b.score - a.score)
 			.map((r) => r.c);
-	}, [chats, query, kindFilter]);
+	}, [chats, query]);
+	/* The render truth in one value: a live query FLATTENS the sections
+	 * (the query wins over the structure — the quick-open walk stays one
+	 * flat list); no query renders the workspace sections. `shown` feeds
+	 * the empty-state copy and the walk's row count — it mirrors the
+	 * RENDERED row order (collapsed sections hold no rows). */
+	const shown: ChatListItem[] | null =
+		flat ??
+		(sections
+			? sections.flatMap((s) => (collapsed[s.key] === true ? [] : filterChatsByKind(s.chats, kindFilterFor(kindFilters, s.key))))
+			: null);
 
 	const refreshInFlightRef = useRef(false);
 	const refresh = useCallback(async () => {
@@ -437,9 +685,16 @@ function SessionsSidebar() {
 		if (refreshInFlightRef.current) return;
 		refreshInFlightRef.current = true;
 		try {
-			const res = await fetch("/api/chats", { cache: "no-store" });
-			const d = (await res.json()) as { chats: ChatListItem[] };
+			// The workspace list rides the same refresh (the sections need
+			// both snapshots; workspaces-changed pokes the same fetch).
+			const [chatsRes, workspacesRes] = await Promise.all([
+				fetch("/api/chats", { cache: "no-store" }),
+				fetch("/api/workspaces", { cache: "no-store" }),
+			]);
+			const d = (await chatsRes.json()) as { chats: ChatListItem[] };
+			const w = (await workspacesRes.json()) as { workspaces: WorkspaceListItem[] };
 			setChats(d.chats);
+			setWorkspaces(w.workspaces);
 		} catch {
 			// a transient failure keeps the last snapshot
 			setChats((prev) => prev ?? []);
@@ -510,6 +765,7 @@ function SessionsSidebar() {
 		}, 250);
 	};
 	useServerEvent("chats-changed", scheduleEventRefresh);
+	useServerEvent("workspaces-changed", scheduleEventRefresh);
 	useServerEvent("turn-started", scheduleEventRefresh);
 	useServerEvent("turn-settled", scheduleEventRefresh);
 	useServerEvent("compaction-changed", scheduleEventRefresh);
@@ -612,9 +868,102 @@ function SessionsSidebar() {
 			setDeleting(null);
 			setChats((prev) => (prev ? prev.filter((c) => c.id !== id) : prev));
 			if (pathname === `/chat/${id}`) router.push("/");
-			window.dispatchEvent(new CustomEvent("lh:graph-revision", { detail: { revision: graphRevision } }));
+			window.dispatchEvent(new CustomEvent("lh:graph-revision", { detail: { revision: graphRevision, scope: null } }));
 		},
 		[pathname, router],
+	);
+
+	/* ── Workspace management (Phase 3): create / rename / delete + the
+	    session move. Every mutation rides the events channel too (the
+	    store announces) — the local patch is the same-tab instant, the
+	    debounced refresh is the backstop. ── */
+	const createWorkspace = useCallback(async (name: string) => {
+		setCreatingWorkspace(false);
+		try {
+			const res = await fetch("/api/workspaces", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ name }),
+			});
+			if (!res.ok) return; // the shape gate already refused honestly
+			const created = (await res.json()) as { id: string; name: string };
+			const now = new Date().toISOString();
+			setWorkspaces((prev) => [...prev, { ...created, createdAt: now, updatedAt: now, sessionCount: 0, busyCount: 0 }]);
+			void refresh();
+		} catch (err) {
+			console.error("workspace create failed:", err);
+		}
+	}, [refresh]);
+
+	const commitWorkspaceRename = useCallback(async (id: string, next: string) => {
+		setRenamingWorkspaceId(null);
+		const t = next.trim();
+		if (t === "") return; // empty commit discards (the header rename's rule)
+		try {
+			const res = await fetch(`/api/workspaces/${id}`, {
+				method: "PUT",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ name: t }),
+			});
+			if (!res.ok) throw new Error(`workspace rename failed: ${res.status}`);
+			setWorkspaces((prev) => prev.map((w) => (w.id === id ? { ...w, name: t } : w)));
+		} catch (err) {
+			console.error("workspace rename failed:", err); // keep the old name
+		}
+	}, []);
+
+	const deleteWorkspaceConfirmed = useCallback(async (id: string) => {
+		setDeletingWorkspaceId(null);
+		try {
+			const res = await fetch(`/api/workspaces/${id}`, { method: "DELETE" });
+			if (res.status === 409) {
+				// The server's honest refusal (not_empty) — the sessions stay;
+				// the learner moves or deletes them first (no silent cascade).
+				const body = (await res.json().catch(() => ({}))) as { error?: string };
+				window.alert(body.error ?? "Move or delete this workspace's sessions first.");
+				void refresh();
+				return;
+			}
+			if (!res.ok) throw new Error(`workspace delete failed: ${res.status}`);
+			// Its sessions orphan to Unsorted (the fold reads an unknown
+			// workspaceId as Unsorted — the refresh lands the truth).
+			setWorkspaces((prev) => prev.filter((w) => w.id !== id));
+			void refresh();
+		} catch (err) {
+			console.error("workspace delete failed:", err);
+		}
+	}, [refresh]);
+
+	// Move success (the dialog's commit): patch the filing in place — the
+	// section fold re-groups on the next render; the server announced
+	// chats-changed, the debounced refresh is the backstop.
+	const onMoved = useCallback(
+		(id: string, workspaceId: string | null, revisions?: { origin: number; originScope: string | null; destination: number; destinationScope: string | null }) => {
+			setMovingChat(null);
+			setChats((prev) =>
+				prev
+					? prev.map((c) => (c.id === id ? { ...c, ...(workspaceId === null ? { workspaceId: undefined } : { workspaceId }) } : c))
+					: prev,
+			);
+			// A move-nodes transport rewrote BOTH graphs: announce each stamp
+			// scoped to the graph it was read from (Phase 6). The Phase 5
+			// legacy-scope pin stays honored: an UNSCOPED stamp still reaches
+			// every selectorless view; a scope-less ORIGIN rides with it as a
+			// legacy fallback when the server didn't name its scope.
+			if (revisions) {
+				window.dispatchEvent(
+					new CustomEvent("lh:graph-revision", {
+						detail: { revision: revisions.origin, ...(revisions.originScope === undefined ? {} : { scope: revisions.originScope }) },
+					}),
+				);
+				window.dispatchEvent(
+					new CustomEvent("lh:graph-revision", {
+						detail: { revision: revisions.destination, scope: revisions.destinationScope ?? undefined },
+					}),
+				);
+			}
+		},
+		[],
 	);
 
 	useEffect(() => {
@@ -628,12 +977,22 @@ function SessionsSidebar() {
 		return () => window.removeEventListener("lh:kbd-sessions-search", onFocusSearch);
 	}, [open, toggle]);
 
-	// Keep the kbd-selected row in view (the rows are the container's only
-	// buttons, so the index matches).
+	// Keep the kbd-selected row in view. In the flattened query list the
+	// rows are the container's only buttons (the index matches); in the
+	// section view the headers/filters add buttons before the rows, so the
+	// walk pins by the row's own testid attribute instead.
 	useEffect(() => {
 		if (kbdIndex === null) return;
-		listRef.current?.querySelectorAll("button")[kbdIndex]?.scrollIntoView({ block: "nearest" });
-	}, [kbdIndex]);
+		const container = listRef.current;
+		if (!container) return;
+		if (flat) {
+			container.querySelectorAll("button")[kbdIndex]?.scrollIntoView({ block: "nearest" });
+			return;
+		}
+		const rows = container.querySelectorAll('[data-testid="session-row"]');
+		const target = rows[kbdIndex] ?? rows[rows.length - 1];
+		target?.scrollIntoView({ block: "nearest" });
+	}, [kbdIndex, flat]);
 
 	useEffect(() => {
 		if (!open) return;
@@ -714,7 +1073,20 @@ function SessionsSidebar() {
 						Practice
 						<span className="sr-only">create a new practice session</span>
 					</button>
+					{/* Workspace wave Phase 3 (decision 3C): the sidebar's door —
+					    inline name row, Enter creates (the rename row's rules). */}
+					<button
+						type="button"
+						data-testid="new-workspace"
+						onClick={() => setCreatingWorkspace(true)}
+						className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-xs uppercase tracking-wider text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+					>
+						<FolderPlusIcon className="size-3" />
+						New workspace
+						<span className="sr-only">create a new workspace</span>
+					</button>
 				</div>
+				{creatingWorkspace && <NewWorkspaceRow onCommit={(name) => void createWorkspace(name)} onCancel={() => setCreatingWorkspace(false)} />}
 
 				<div className="mx-3 mb-2 flex items-center gap-2">
 					<span className="text-xs uppercase tracking-widest text-muted-foreground/70">Sessions</span>
@@ -777,62 +1149,131 @@ function SessionsSidebar() {
 					</Hint>
 				</div>
 
-				{/* The three-way filter, HEADING THE LIST (owner round 8b,
-				    2026-10-05 — moved below the search): it scopes what the
-				    list shows, so it sits directly above it as a caption row;
-				    search stays the top muscle-memory target. Order: Teaching /
-				    Practice / All — the real modes first, "All" as the escape
-				    hatch on the right, mirroring the create-buttons above.
-				    Persisted client-side. */}
-				<div className="mx-3 flex items-center gap-0.5 rounded-md border border-border/60 bg-background p-0.5" data-testid="session-kind-filter">
-					{(["teach", "practice", "all"] as const).map((f) => (
-						<button
-							key={f}
-							type="button"
-							data-testid={`kind-filter-${f}`}
-							onClick={() => setFilter(f)}
-							className={cn(
-								"flex-1 rounded-sm px-2 py-1 text-[11px] uppercase tracking-wider transition-colors",
-								kindFilter === f
-									? "bg-accent text-foreground"
-									: "text-muted-foreground hover:text-foreground",
-							)}
-						>
-							{f === "teach" ? "Teaching" : f === "all" ? "All" : "Practice"}
-						</button>
-					))}
-				</div>
+				{/* The kind filter is PER WORKSPACE (owner decision 4C, workspace
+				    wave Phase 3): the row moved from a single global caption into
+				    each section (rendered per open section, below). A live query
+				    flattens the sections — the filter row hides with the sections
+				    (the query scopes the whole list, structure retired for the
+				    walk). */}
 
-				<div ref={listRef} className="flex-1 overflow-y-auto p-2">
+				<div ref={listRef} className="flex-1 overflow-y-auto p-2" data-testid="session-list">
 					{shown === null ? (
 						<div className="px-2 py-4 text-xs text-muted-foreground">Loading…</div>
-					) : shown.length === 0 ? (
-						<div className="px-2 py-4 text-xs text-muted-foreground">
-							{query.trim() ? "No sessions match." : "No sessions yet."}
-						</div>
-					) : (
-						shown.map((c, i) =>
-							renamingId === c.id ? (
-								<RenameRow
-									key={c.id}
-									chat={c}
-									onCommit={(next) => void commitRename(c.id, next)}
-									onCancel={() => setRenamingId(null)}
-								/>
-							) : (
-								<SessionRow
-									key={c.id}
-									chat={c}
-									active={pathname === `/chat/${c.id}`}
-									kbdSelected={i === kbdIndex}
-									onOpen={() => {
-										setKbdIndex(null);
-										router.push(`/chat/${c.id}`);
-									}}
-									onContextMenu={(e) => openContext(e, c)}
-								/>
-							),
+					) : flat !== null ? (
+						/* The flattened query list — one walked list, no sections,
+						   no per-section filter rows (the query scopes everything). */
+						flat.length === 0 ? (
+							<div className="px-2 py-4 text-xs text-muted-foreground">No sessions match.</div>
+						) : (
+							flat.map((c, i) =>
+								renamingId === c.id ? (
+									<RenameRow
+										key={c.id}
+										chat={c}
+										onCommit={(next) => void commitRename(c.id, next)}
+										onCancel={() => setRenamingId(null)}
+									/>
+								) : (
+									<SessionRow
+										key={c.id}
+										chat={c}
+										active={pathname === `/chat/${c.id}`}
+										kbdSelected={i === kbdIndex}
+										onOpen={() => {
+											setKbdIndex(null);
+											router.push(`/chat/${c.id}`);
+										}}
+										onContextMenu={(e) => openContext(e, c)}
+									/>
+								),
+							)
 						)
+					) : sections!.length === 0 ? (
+						<div className="px-2 py-4 text-xs text-muted-foreground">No sessions yet.</div>
+					) : (
+						/* The walk cursor runs across the sections in render order;
+						   `shown` mirrors the same sequence (collapsed sections hold
+						   no rows). */
+						(() => {
+							let walkCursor = 0;
+							return (
+						sections!.map((section) => {
+							const filter = kindFilterFor(kindFilters, section.key);
+							const visible = filterChatsByKind(section.chats, filter);
+							const isCollapsed = collapsed[section.key] === true;
+							// busyCount from the section's own rows — ChatListItem.busy
+							// is the route's liveness merge (the same spinner the rows
+							// carry; the header signals "a section owns a live turn").
+							const busyCount = section.chats.filter((c) => c.busy).length;
+							return (
+								<div key={section.key}>
+									{renamingWorkspaceId === section.key ? (
+										<WorkspaceRenameRow
+											name={section.name}
+											onCommit={(next) => void commitWorkspaceRename(section.key, next)}
+											onCancel={() => setRenamingWorkspaceId(null)}
+										/>
+									) : (
+										<WorkspaceSectionHeader
+											section={section}
+											collapsed={isCollapsed}
+											busyCount={busyCount}
+											onToggle={() => toggleCollapsed(section.key)}
+											onRename={() => section.workspaceId !== null && setRenamingWorkspaceId(section.key)}
+											onDelete={() => section.workspaceId !== null && setDeletingWorkspaceId(section.key)}
+										/>
+									)}
+									{deletingWorkspaceId === section.key && section.workspaceId !== null && (
+										<WorkspaceDeleteConfirm
+											name={section.name}
+											onConfirm={() => void deleteWorkspaceConfirmed(section.workspaceId!)}
+											onCancel={() => setDeletingWorkspaceId(null)}
+										/>
+									)}
+									{!isCollapsed && (
+										<>
+											{/* The filter row rides any section holding
+											    sessions — even when the current filter
+											    empties it (the row must stay reachable
+											    to switch back). */}
+											{section.chats.length > 0 && (
+												<KindFilterRow sectionKey={section.key} filter={filter} onFilter={(f) => setFilter(section.key, f)} />
+											)}
+											{visible.map((c) => {
+												// The walk index runs across the sections in
+												// render order — `shown` mirrors exactly this
+												// sequence, so kbdIndex names the same row here.
+												const walkIndex = walkCursor++;
+												return renamingId === c.id ? (
+													<div key={c.id} className="pl-3">
+														<RenameRow
+															chat={c}
+															onCommit={(next) => void commitRename(c.id, next)}
+															onCancel={() => setRenamingId(null)}
+														/>
+													</div>
+												) : (
+													<div key={c.id} className="pl-3">
+														<SessionRow
+															chat={c}
+															active={pathname === `/chat/${c.id}`}
+															kbdSelected={walkIndex === kbdIndex}
+															onOpen={() => {
+																setKbdIndex(null);
+																router.push(`/chat/${c.id}`);
+															}}
+															onContextMenu={(e) => openContext(e, c)}
+														/>
+													</div>
+												);
+											})}
+										</>
+									)}
+								</div>
+							);
+						})
+							);
+						})()
 					)}
 				</div>
 
@@ -913,6 +1354,18 @@ function SessionsSidebar() {
 						</button>
 						<button
 							type="button"
+							data-testid="ctx-move"
+							onClick={() => {
+								const target = chats?.find((c) => c.id === ctxChatId);
+								if (target) setMovingChat(target);
+								setCtxChatId(null);
+							}}
+							className="flex items-center rounded-lg px-2.5 py-1.5 text-left text-foreground transition-colors hover:bg-accent"
+						>
+							Move to workspace…
+						</button>
+						<button
+							type="button"
 							data-testid="ctx-delete"
 							onClick={() => {
 								const target = chats?.find((c) => c.id === ctxChatId);
@@ -934,6 +1387,16 @@ function SessionsSidebar() {
 					chat={deleting}
 					onClose={() => setDeleting(null)}
 					onDeleted={onDeleted}
+				/>
+
+				{/* The move dialog (workspace wave Phase 3): the A3 design's
+				    v1 half — destination picker + Unsorted; the graph-traces mode
+				    rides this dialog in Phase 5. */}
+				<MoveSessionDialog
+					chat={movingChat}
+					workspaces={workspaces.filter((w) => w.id !== movingChat?.workspaceId)}
+					onClose={() => setMovingChat(null)}
+					onMoved={onMoved}
 				/>
 			</aside>
 	);

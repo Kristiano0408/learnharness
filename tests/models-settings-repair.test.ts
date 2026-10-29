@@ -49,7 +49,7 @@ async function put(body: unknown) {
 }
 beforeEach(async () => {
 	await connection(false);
-	writeSettingsRecord({ version: 1, models: initial, general: { autoUpdate: false }, graph: { rendering: false } });
+	writeSettingsRecord({ version: 1, models: initial, general: {}, graph: { rendering: false } });
 });
 after(() => {
 	if (originalSend) Object.defineProperty(process, "send", originalSend); else delete process.send;
@@ -66,7 +66,7 @@ for (const slot of slots) test(`${slot} can be replaced while the other disconne
 	const stored = readSettingsRecord()!;
 	assert.deepEqual(stored.models?.[slot], { model: replacement, thinkingLevel: "max" });
 	for (const other of slots.filter((name) => name !== slot)) assert.deepEqual(stored.models?.[other], initial[other]);
-	assert.deepEqual(stored.general, { autoUpdate: false });
+	assert.deepEqual(stored.general, {});
 	assert.deepEqual(stored.graph, { rendering: false });
 	assert.deepEqual((await response.json()).settings, stored);
 	assert(!modelCatalog().models.some((model) => model.provider === copilot.provider), "saving stale pins must not make them available choices");

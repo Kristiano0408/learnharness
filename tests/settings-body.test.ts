@@ -20,18 +20,18 @@ import {
 } from "../src/server/settings-body.ts";
 
 describe("parseGeneralSettingsBody", () => {
-	it("parses {} and {autoUpdate} replace-whole", () => {
+	it("parses {} replace-whole and rejects autoUpdate since updates are manual", () => {
 		const empty = parseGeneralSettingsBody({});
 		assert.ok(empty.ok);
 		assert.deepEqual(empty.settings, {});
-		const on = parseGeneralSettingsBody({ autoUpdate: true });
-		assert.ok(on.ok);
-		assert.deepEqual(on.settings, { autoUpdate: true });
+		const stale = parseGeneralSettingsBody({ autoUpdate: true });
+		assert.equal(stale.ok, false);
+		assert.match(stale.error, /autoUpdate was removed/);
 	});
 
-	it("rejects non-objects and non-boolean autoUpdate", () => {
+	it("rejects non-objects and unknown properties", () => {
 		assert.equal(parseGeneralSettingsBody("x").ok, false);
-		assert.equal(parseGeneralSettingsBody({ autoUpdate: "yes" }).ok, false);
+		assert.equal(parseGeneralSettingsBody({ unknownKey: 123 }).ok, false);
 	});
 });
 

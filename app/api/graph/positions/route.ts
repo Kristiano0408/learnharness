@@ -10,6 +10,7 @@
  *         (empty object = nothing written).
  */
 import { commitPositions } from "@/src/server";
+import { WORKSPACE_ID_PATTERN } from "@/config.ts";
 
 export const dynamic = "force-dynamic";
 
@@ -20,5 +21,12 @@ export async function PUT(request: Request) {
 	} catch {
 		return Response.json({ error: "invalid JSON body" }, { status: 400 });
 	}
-	return Response.json({ positions: commitPositions(body) });
+	// THE WORKSPACE SELECTOR (Phase 6): the positions ledger rides the same
+	// selector as the snapshot — absent = legacy global, id = that workspace.
+	const url = new URL(request.url);
+	const raw = url.searchParams.get("workspace");
+	if (raw !== null && !WORKSPACE_ID_PATTERN.test(raw)) {
+		return Response.json({ error: "unknown workspace" }, { status: 404 });
+	}
+	return Response.json({ positions: commitPositions(body, raw ?? undefined) });
 }

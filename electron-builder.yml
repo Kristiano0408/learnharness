@@ -54,34 +54,11 @@ files:
   - "!**/*"
   - electron/**/*
   - package.json
-  # Auto-update (Wave C, 2026-10-10): electron-updater + its runtime tree
-  # re-included explicitly. The negation above excludes node_modules, and
-  # the shell's bare positives can't re-include them — these explicit
-  # node_modules positives do (gitignore order: the LAST matching pattern
-  # wins; verified post-build by listing the asar — see desktop:dist notes).
-  # Tree fact-checked via each package's declared dependencies:
-  # electron-updater → fs-extra, js-yaml, lazy-val, lodash.escaperegexp,
-  # lodash.isequal, semver, tiny-typed-emitter, builder-util-runtime;
-  # builder-util-runtime → debug, sax; fs-extra → graceful-fs, jsonfile,
-  # universalify; debug → ms; jsonfile → universalify (again); js-yaml →
-  # argparse. Keep in sync when electron-updater bumps (npm ls --all).
-  - node_modules/electron-updater/**/*
-  - node_modules/fs-extra/**/*
-  - node_modules/js-yaml/**/*
-  - node_modules/lazy-val/**/*
-  - node_modules/lodash.escaperegexp/**/*
-  - node_modules/lodash.isequal/**/*
-  - node_modules/semver/**/*
-  - node_modules/tiny-typed-emitter/**/*
-  - node_modules/builder-util-runtime/**/*
-  - node_modules/debug/**/*
-  - node_modules/sax/**/*
-  - node_modules/graceful-fs/**/*
-  - node_modules/jsonfile/**/*
-  - node_modules/universalify/**/*
-  - node_modules/ms/**/*
-  - node_modules/argparse/**/*
-  # Main-process ID-token signature verification (no bundled OAuth implementation).
+  # No updater payload since 2026-10-29 (owner ruling): the auto-update wave
+  # was removed wholesale — an installed build silently self-updated over the
+  # baked upstream feed and replaced local rebuilds. The shell requires only
+  # electron + node builtins; jose stays for main-process ID-token signature
+  # verification (no bundled OAuth implementation).
   - node_modules/jose/**/*
 extraResources:
   # Attribution/license for the bounded local Pi cutoff-selector port.
@@ -106,9 +83,9 @@ mac:
     - from: electron/server-title-guard.cjs
       to: server-title-guard.cjs
   icon: build/icon.icon
-  # zip rides next to dmg (flipped 2026-10-08): Squirrel.Mac — Electron's
-  # macOS auto-updater — installs from ZIP and cannot read DMGs. DMG is
-  # for humans; ZIP + blockmap are the updater's payload.
+  # zip rides next to dmg (flipped 2026-10-08): the ZIP is a convenience
+  # archive for manual installs; the DMG is the human installer. No
+  # auto-updater since 2026-10-29 — nothing consumes the ZIP automatically.
   target:
     - target: dmg
       arch:
@@ -158,8 +135,10 @@ win:
       arch:
         - x64
   artifactName: "${productName}-${version}-${arch}-setup.${ext}"
-  # Unsigned Windows release (owner ruling): preserve icon/version metadata,
-  # skip signing, and do not require a publisher signature for updates.
+  # Unsigned Windows release (owner ruling): preserve icon/version metadata
+  # and skip signing. verifyUpdateCodeSignature stays false for defense in
+  # depth: nothing in the app can consume an update feed, but if a future
+  # tooling ever did, unsigned releases are this project's reality.
   signExecutable: false
   verifyUpdateCodeSignature: false
 nsis:
@@ -178,15 +157,16 @@ linux:
   category: Education
   # Match Electron's app_id/WM_CLASS to the installed desktop launcher.
   syncDesktopName: true
-  # Both targets update via electron-updater 6.8.9. AppImage replaces its
-  # own file; deb uses dpkg/apt and may request administrator permission.
+  # Manual installs only (owner ruling, 2026-10-29): the AppImage never
+  # replaces itself; both targets are plain installers the human picks up
+  # from releases. No updater reads any feed.
 publish:
-  # Update feed = GitHub Releases (decided 2026-10-08): latest-mac.yml +
-  # zip/blockmap live on releases; electron-updater reads them anonymously.
-  # REQUIRES THE REPO TO BE PUBLIC before 0.3.0 ships — anonymous downloads
-  # from a private repo are impossible, and a token baked into the app
-  # would be a leak. desktop:dist passes no --publish flag, so builds never
-  # upload; publishing happens at release time (GH_TOKEN + --publish).
+  # GitHub Releases remain the publication channel for installers (the
+  # release workflow uploads and publishes them). NO update feed exists:
+  # nothing in the app downloads releases automatically — updates are purely
+  # manual (download an artifact, install it yourself). desktop:dist passes
+  # no --publish flag, so builds never upload; publishing happens at release
+  # time (GH_TOKEN + --publish).
   - provider: github
     owner: amosblomqvist
     repo: learnharness

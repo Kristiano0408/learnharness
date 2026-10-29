@@ -37,9 +37,12 @@ export function parseNotesImportResults(body: unknown, files: readonly File[]): 
 	return body.results as NotesImportResult[];
 }
 
-export async function postNotesImport(files: readonly File[]): Promise<NotesImportResult[]> {
+export async function postNotesImport(files: readonly File[], workspaceId?: string): Promise<NotesImportResult[]> {
 	const form = new FormData();
 	for (const file of files) form.append("files", file);
+	// THE WORKSPACE DESTINATION (Phase 4, decision 8): the chosen workspace
+	// rides the form — absent = legacy global today's default.
+	if (workspaceId !== undefined) form.append("workspace", workspaceId);
 	const response = await fetch("/api/graph/import", { method: "POST", body: form });
 	let body: unknown;
 	try { body = await response.json(); }
@@ -56,6 +59,9 @@ export function useNotesImport(callbacks: { onStart?: () => void; onFinish?: () 
 	const [errors, setErrors] = useState<string[]>([]);
 	const [importing, setImporting] = useState(false);
 	const pending = useRef(false);
+	// THE WORKSPACE DESTINATION (Phase 4): the graph view's selector hands
+	// this hook the chosen workspace id; every submit rides it.
+	const workspaceRef = useRef<string | undefined>(undefined);
 	const submit = async (files: File[]) => {
 		if (pending.current || files.length === 0) return;
 		pending.current = true;
@@ -63,7 +69,7 @@ export function useNotesImport(callbacks: { onStart?: () => void; onFinish?: () 
 		setErrors([]);
 		try {
 			callbacks.onStart?.();
-			const results = await postNotesImport(files);
+			const results = await postNotesImport(files, workspaceRef.current);
 			setErrors(results
 				.filter((result) => !result.ok)
 				.sort((a, b) => a.requestIndex - b.requestIndex)
@@ -79,6 +85,11 @@ export function useNotesImport(callbacks: { onStart?: () => void; onFinish?: () 
 	};
 	return {
 		errors, importing,
+		/** The graph view's workspace selector: sets the destination for the
+		 *  next imports (undefined = legacy global). */
+		setWorkspace: (id: string | undefined) => {
+			workspaceRef.current = id;
+		},
 		onImportFiles: (files: FileList | null) => { if (files) void submit(Array.from(files)); },
 	};
 }

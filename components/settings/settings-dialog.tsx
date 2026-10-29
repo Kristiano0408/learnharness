@@ -356,19 +356,17 @@ export function SettingsDialogBody({
 						</p>
 					) : (
 						<div>
-							{active === "general" && (
-								<SettingsSection
-									title="General"
-									testid="section-general"
-								>
-									<UpdateSettings
-										autoUpdate={record.general?.autoUpdate ?? true}
-										onAutoUpdateChange={(on) =>
-											void write("general", { ...record.general, autoUpdate: on })
-										}
-									/>
-								</SettingsSection>
-							)}
+						{active === "general" && (
+							<SettingsSection
+								title="General"
+								testid="section-general"
+							>
+								{/* Manual updates only (owner ruling, 2026-10-29): the
+								    updater is gone — the row shows the installed version
+								    and release notes; the human installs chosen artifacts. */}
+								<UpdateSettings />
+							</SettingsSection>
+						)}
 							{active === "keys" && (
 								<SettingsSection title="Providers" testid="section-keys">
 									<KeysSection initialRow={initialRow ?? undefined} />								<CustomEndpointsSection

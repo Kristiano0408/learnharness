@@ -55,10 +55,12 @@
  * together close every corrupt/resurrect path.
  */
 
+import { randomBytes } from "node:crypto";
 import type {
 	CoverageEntry,
 	GraphChain,
 	GraphNode,
+	Position,
 	SessionCheckpoint,
 } from "./contracts.ts";
 import type { GraphStore } from "./ports.ts";
@@ -331,4 +333,374 @@ export function deleteNodeTraces(graphStore: GraphStore, nodeId: string): NodeDe
 	return {
 		chainsRemoved: chainLines.length - outChains.length,
 	};
+}
+// ─── session move — the graph-trace transport (workspace wave Phase 5, owner A3 decision 2026-10-28) ──
+
+/**
+ * Move one session's graph traces between two graphs (docs/workspaces.md
+ * Fase 5, the A3 dialog's second mode: `move-session-and-nodes`). The
+ * transfer seam is deliberately a PAIR of pure operations — a TAKE on the
+ * origin and a LAND on the destination — never one rewrite across two
+ * stores:
+ *
+ *   takeChatTraces(graph, chatId)
+ *       exactly the delete-nodes semantics (the provenance points die, the
+ *       session's link lines die with their phrasings, fully-owned nodes
+ *       die entirely and shared nodes survive — identity intact, alias
+ *       strip per owner 2026-09-23), PLUS the carried-delta extraction:
+ *       the rows actually leaving the origin are returned in append order.
+ *       Coverage + checkpoint rows always move (extraction bookkeeping is
+ *       session state, not graph content — same rule as deletion).
+ *
+ *   landChatTraces(graph, chatId, carried)
+ *       append-only on the destination: nodes with a foreign origin id are
+ *       re-minted `n_` and chains' endpoints follow the same map (the two
+ *       graphs are independent namespaces — a verbatim id could weld this
+ *       build's node onto an unrelated one already minted there); carried
+ *       positions land for re-minted ids only (destination-owned ids keep
+ *       their resting spot, owner copy+prune ruling 2026-10-29).
+ *
+ * The caller (src/server/workspaces.ts moveChatSessionGraph) owns the two
+ * rewrites in ONE synchronous block, origin first then destination — the
+ * wave-6 atomicity argument unchanged: no extraction append can interleave
+ * while the event loop never yields mid-block; a crash between the two
+ * writes leaves nothing resurrected (the moved session's coverage rows are
+ * gone from both graphs, so re-extraction re-covers them against the
+ * destination ledger — idempotent).
+ */
+
+/** The A3 dialog's two modes (docs/workspaces.md Fase 5): machine-checkable
+ *  on the API as the required `mode` param — no default, so no accidental
+ *  destructive choice. "move-session" rides moveChatSession (Phase 2). */
+export type ChatMoveMode = "move-session" | "move-nodes";
+
+/** One carried row of the move delta (append order preserved). */
+export interface ChatTraceDelta {
+	/** Node LINES whose provenance emptied in the origin — fully-owned
+	 *  nodes (their create line, identity intact) or this session's own
+	 *  link lines on shared nodes. Foreign provenance already stripped. */
+	nodes: GraphNode[];
+	/** Chain assertion lines with ALL their points removed (the moved
+	 *  session was the only asserter). Premises/conclusion may name node
+	 *  ids that died in the origin — `landChatTraces` re-mints them. */
+	chains: GraphChain[];
+	coverage: CoverageEntry[];
+	checkpoints: SessionCheckpoint[];
+	/** Resting positions of every carried id (node/chain), copied before
+	 *  deletion pruned them from the origin's layout ledger. */
+	positions: Record<string, Position>;
+}
+
+export interface ChatMoveStats {
+	/** Node lines landed at the destination (create + link lines). */
+	nodesMoved: number;
+	/** Chain assertion lines landed. */
+	chainsMoved: number;
+	coverageMoved: number;
+	checkpointsMoved: number;
+	/** Distinct nodes that died ENTIRELY in the origin (all references were
+	 *  this session's — owner ruling 2026-10-29: a moved trace leaving the
+	 *  origin means the origin loses it, full death exactly like delete-nodes). */
+	originNodesRemoved: number;
+	/** Chain assertion lines removed from the origin (empty provenance or dead member). */
+	originChainsRemoved: number;
+}
+
+const EMPTY_MOVE_STATS: ChatMoveStats = {
+	nodesMoved: 0,
+	chainsMoved: 0,
+	coverageMoved: 0,
+	checkpointsMoved: 0,
+	originNodesRemoved: 0,
+	originChainsRemoved: 0,
+};
+
+function movedGraphNodeId(): string {
+	return `n_${randomBytes(6).toString("hex")}`;
+}
+
+const moveChainKey = (premises: readonly string[], conclusion: string): string =>
+	`${[...premises].sort().join(",")} -> ${conclusion}`;
+
+/**
+ * The origin's TAKE side. Synchronous by design (the atomicity argument),
+ * idempotent (a second take finds nothing and carries nothing).
+ */
+export function takeChatTraces(graphStore: GraphStore, chatId: string): {
+	delta: ChatTraceDelta;
+	stats: ChatMoveStats;
+} {
+	// Bookkeeping rides ALWAYS — extraction state is session state, not graph
+	// content (the same rule as deletion, preserve-graph mode included).
+	const allCoverage = graphStore.readCoverage();
+	const movedCoverage = allCoverage.filter((row) => row.chatId === chatId);
+	const keptCoverage = allCoverage.filter((row) => row.chatId !== chatId);
+	const allCheckpoints = graphStore.readCheckpoints();
+	const movedCheckpoints = allCheckpoints.filter((row) => row.chatId === chatId);
+	const keptCheckpoints = allCheckpoints.filter((row) => row.chatId !== chatId);
+
+	const nodeLines = graphStore.readNodes();
+	const chainLines = graphStore.readChains();
+
+	const touched =
+		nodeLines.some((line) => line.provenance.some((pt) => pt.chatId === chatId)) ||
+		chainLines.some((line) => line.provenance.some((pt) => pt.chatId === chatId));
+
+	if (!touched) {
+		if (movedCoverage.length > 0 || movedCheckpoints.length > 0) {
+			graphStore.rewriteLedgers({ coverage: keptCoverage, checkpoints: keptCheckpoints });
+		}
+		return {
+			delta: { nodes: [], chains: [], coverage: movedCoverage, checkpoints: movedCheckpoints, positions: {} },
+			stats: {
+				...EMPTY_MOVE_STATS,
+				coverageMoved: movedCoverage.length,
+				checkpointsMoved: movedCheckpoints.length,
+			},
+		};
+	}
+
+	// 1. Survival — identical rule to deleteChatTraces: a node lives iff ANY
+	//    surviving reference remains (another chat/src's provenance point).
+	const survives = (points: ReadonlyArray<{ chatId: string }>): boolean =>
+		points.some((pt) => pt.chatId !== chatId);
+	const live = new Set<string>();
+	for (const line of nodeLines) {
+		if (survives(line.provenance)) live.add(line.id);
+	}
+
+	// 2. Node lines — per-line, exactly the deletion's filter with the
+	//    carried-delta extraction: every point of chatId is stripped from the
+	//    origin; what leaves rides out in append order.
+	const outNodes: GraphNode[] = [];
+	const carriedNodes: GraphNode[] = [];
+	const seenIds = new Set<string>();
+	for (const line of nodeLines) {
+		const first = !seenIds.has(line.id);
+		seenIds.add(line.id);
+		if (!live.has(line.id)) {
+			// The whole node dies in the origin (owner ruling 2026-10-29 —
+			// full death, exactly like delete-nodes): every line carries its
+			// provenance out; the create line leads with its phrasings
+			// (identity intact), link lines carry points only.
+			carriedNodes.push({
+				...line,
+				provenance: line.provenance.filter((pt) => pt.chatId === chatId),
+				aliases: first ? [...line.aliases] : [],
+			});
+			continue;
+		}
+		const movedPoints = line.provenance.filter((pt) => pt.chatId === chatId);
+		if (movedPoints.length === 0) {
+			outNodes.push(line); // untouched by this session
+			continue;
+		}
+		const points = line.provenance.filter((pt) => pt.chatId !== chatId);
+		if (points.length > 0) {
+			// A shared node: the session's points (and this run's phrasings)
+			// ride out as their own carried line; the foreign points stay in
+			// the origin with the line (mix-line case keeps the phrasings —
+			// defensive: single runs never mix chats).
+			outNodes.push({ ...line, provenance: points });
+			carriedNodes.push({ ...line, provenance: movedPoints, aliases: [...line.aliases] });
+			continue;
+		}
+		if (first) {
+			// The create line of a surviving node the moved session minted —
+			// identity stays in the origin (owner ruling 2026-09-23 re-read
+			// for moves: all traces move, identity survives); this session's
+			// phrasings carry out.
+			outNodes.push({ ...line, provenance: [], aliases: [] });
+			carriedNodes.push({ ...line, provenance: movedPoints, aliases: [...line.aliases] });
+		} else {
+			// The moved session's link line on a node another session
+			// created: the whole line leaves (phrasings + points).
+			carriedNodes.push({ ...line, provenance: movedPoints, aliases: [...line.aliases] });
+		}
+	}
+
+	// 3. Chains — strip this session's points; an assertion DIES in the
+	//    origin when this move empties its provenance or any member node
+	//    died in this take (the deletion's deadNodes rule, unchanged). A
+	//    dying line carries ALL its provenance out (survival needs no chain
+	//    points — only node lines reference chains, which ride the origin's
+	//    rewrite; carriedChains never feeds survival).
+	const deadNodes = new Set([...new Set(nodeLines.map((line) => line.id))].filter((id) => !live.has(id)));
+	const outChains: GraphChain[] = [];
+	const carriedChains: GraphChain[] = [];
+	for (const line of chainLines) {
+		if (deadNodes.has(line.conclusion) || line.premises.some((premise) => deadNodes.has(premise))) {
+			carriedChains.push({ ...line, provenance: line.provenance.filter((pt) => pt.chatId === chatId) });
+			continue;
+		}
+		const points = line.provenance.filter((pt) => pt.chatId !== chatId);
+		if (line.provenance.length > 0 && points.length === 0) {
+			carriedChains.push({ ...line, provenance: line.provenance });
+			continue;
+		}
+		outChains.push(points.length === line.provenance.length ? line : { ...line, provenance: points });
+	}
+
+	// 4. Carried positions — every carried id's resting spot (dead member
+	//    nodes ride too), copied BEFORE the prune below.
+	const carriedIds = new Set<string>([
+		...carriedNodes.map((line) => line.id),
+		...carriedChains.map((line) => line.id),
+	]);
+	for (const line of carriedChains) {
+		if (deadNodes.has(line.conclusion)) carriedIds.add(line.conclusion);
+		for (const premise of line.premises) if (deadNodes.has(premise)) carriedIds.add(premise);
+	}
+
+	// 5. The origin rewrite — nodes/chains always rewritten when the take
+	//    touched them; coverage/checkpoints rewritten when non-empty.
+	graphStore.rewriteLedgers({
+		nodes: outNodes,
+		chains: outChains,
+		coverage: keptCoverage,
+		checkpoints: keptCheckpoints,
+	});
+
+	// 6. Positions prune — dead ids (nodes + chains) leave the origin's
+	//    layout ledger, same rule as deletion.
+	const deadChainIds = new Set(
+		chainLines.filter((line) => !outChains.includes(line)).map((line) => line.id),
+	);
+	const knownNodeIds = new Set(nodeLines.map((line) => line.id));
+	const positions = graphStore.readPositions();
+	const prunedPositions = Object.fromEntries(
+		Object.entries(positions).filter(
+			([id]) => (live.has(id) || !knownNodeIds.has(id)) && !deadChainIds.has(id),
+		),
+	);
+	if (Object.keys(prunedPositions).length !== Object.keys(positions).length) {
+		graphStore.writePositions(prunedPositions);
+	}
+
+	const carriedPositions = Object.fromEntries(
+		Object.entries(positions).filter(([id]) => carriedIds.has(id)),
+	);
+
+	return {
+		delta: {
+			nodes: carriedNodes,
+			chains: carriedChains,
+			coverage: movedCoverage,
+			checkpoints: movedCheckpoints,
+			positions: carriedPositions,
+		},
+		stats: {
+			...EMPTY_MOVE_STATS,
+			nodesMoved: carriedNodes.length,
+			chainsMoved: carriedChains.length,
+			coverageMoved: movedCoverage.length,
+			checkpointsMoved: movedCheckpoints.length,
+			originNodesRemoved: deadNodes.size,
+			originChainsRemoved: chainLines.length - outChains.length,
+		},
+	};
+}
+
+/**
+ * The destination's LAND side. APPEND-ONLY (appendNode/appendChain — the
+ * destination store never rewrites its ledgers): carried node ids foreign
+ * to the destination are re-minted `n_`, chains' endpoints follow the same
+ * map, and a chain line already asserted by chatId keeps its destination
+ * id and unions provenance link-style (the merger rule, preserved).
+ */
+export function landChatTraces(graphStore: GraphStore, chatId: string, delta: ChatTraceDelta): void {
+	if (
+		delta.nodes.length === 0 &&
+		delta.chains.length === 0 &&
+		delta.coverage.length === 0 &&
+		delta.checkpoints.length === 0
+	) {
+		return;
+	}
+
+	// Node ids (owner ruling 2026-10-29): PRESERVED — each graph only ever
+	// gained its ids here, so a carried id that the destination never minted
+	// lands unchanged (deep-links and chain endpoints stay stable). On the
+	// sole collision case (the destination holds that id from its own mint —
+	// reachable only through a move round-trip) the line lands under a fresh
+	// mint instead of welding onto the unrelated node.
+	const destinationNodeIds = new Set(graphStore.readNodes().map((line) => line.id));
+	const idMap = new Map<string, string>();
+	for (const line of delta.nodes) {
+		let target = idMap.get(line.id);
+		if (target === undefined) {
+			target = destinationNodeIds.has(line.id) ? movedGraphNodeId() : line.id;
+			idMap.set(line.id, target);
+		}
+		graphStore.appendNode({ ...line, id: target });
+	}
+
+	const resolve = (endpoint: string): string => idMap.get(endpoint) ?? endpoint;
+	// Link-style destination ids (the merger's rule, preserved): a carried
+	// chain whose (premises, conclusion) key already lives at the destination
+	// — asserted there by another source — keeps that destination id and
+	// unions its provenance; otherwise the original arg_ id is preserved
+	// (deep-stable), a real collision mints fresh.
+	const destinationChainLines = graphStore.readChains();
+	const existingChainIds = new Set(destinationChainLines.map((line) => line.id));
+	const destinationKeys = new Map<string, string>();
+	for (const line of destinationChainLines) {
+		const key = moveChainKey(line.premises, line.conclusion);
+		if (!destinationKeys.has(key)) destinationKeys.set(key, line.id);
+	}
+	for (const line of delta.chains) {
+		const conclusion = resolve(line.conclusion);
+		const premises = [...new Set(line.premises.map(resolve))].filter((p) => p !== conclusion);
+		if (premises.length === 0) continue; // a dropped dead-member premise must not weld the conclusion alone
+		const key = moveChainKey(premises, conclusion);
+		const landedId = destinationKeys.get(key) ?? (existingChainIds.has(line.id) ? movedGraphChainId() : line.id);
+		graphStore.appendChain({
+			id: landedId,
+			premises,
+			conclusion,
+			createdAt: line.createdAt,
+			provenance: line.provenance,
+		});
+	}
+
+	// Bookkeeping rides: coverage dedupes per (chatId, fp) against the
+	// destination ledger (a moved-back session's rows stay one-fingered);
+	// a checkpoint lands only when the destination has none for the chat yet
+	// (the fold stamp the destination already carries is the newer truth).
+	const heldCoverage = new Map<string, Set<string>>();
+	for (const entry of graphStore.readCoverage()) {
+		const keys = heldCoverage.get(entry.chatId) ?? new Set<string>();
+		keys.add(entry.fp);
+		heldCoverage.set(entry.chatId, keys);
+	}
+	for (const entry of delta.coverage) {
+		if (heldCoverage.get(entry.chatId)?.has(entry.fp) === true) continue;
+		graphStore.appendCoverage(entry);
+		const keys = heldCoverage.get(entry.chatId) ?? new Set<string>();
+		keys.add(entry.fp);
+		heldCoverage.set(entry.chatId, keys);
+	}
+	if (!graphStore.readCheckpoints().some((row) => row.chatId === chatId)) {
+		for (const checkpoint of delta.checkpoints) graphStore.appendCheckpoint(checkpoint);
+	}
+
+	// Carried positions land for their resolved ids — PRESERVED (unmapped) ids
+	// ride their resting spot out unchanged, re-minted ids get the origin's
+	// spot at the new id; a destination-owned id keeps its own resting spot
+	// (owner copy+prune ruling 2026-10-29).
+	if (Object.keys(delta.positions).length > 0) {
+		const positions = graphStore.readPositions();
+		let touched = false;
+		for (const [oldId, position] of Object.entries(delta.positions)) {
+			const target = idMap.has(oldId) ? idMap.get(oldId)! : oldId;
+			if (target === undefined || positions[target] !== undefined) continue;
+			positions[target] = position;
+			touched = true;
+		}
+		if (touched) graphStore.writePositions(positions);
+	}
+}
+
+function movedGraphChainId(): string {
+	return `arg_${randomBytes(6).toString("hex")}`;
 }

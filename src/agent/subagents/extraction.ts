@@ -29,6 +29,7 @@ import { emit } from "../../core/events.ts";
 import { settleGraphLayout } from "../../core/layout-settle.ts";
 import { batchRuns, coverageOf, messageViewLines } from "../../core/coverage.ts";
 import { failedOutputCallIds, type LhMessage } from "../../core/native-messages.ts";
+import { WORKSPACE_GRAPH_REFUSAL } from "../../core/workspace-refusal.ts";
 import { auditorGraphTools } from "../tools/graph.ts";
 import { runSubmitAgent, healStringifiedArrays } from "./submit-agent.ts";
 
@@ -736,6 +737,19 @@ export interface ExtractionPipelineDeps extends GraphDeps, ExtractionModels {
 	 *  callers wire the live effective settings (extraction-UX redesign,
 	 *  2026-09-24). */
 	getChunkTokens?: () => number;
+	/** THE WORKSPACE GRAPH SEAM (workspace wave Phase 4, docs/workspaces.md
+	 *  decision 1B): the chat front door resolves the session's graph store
+	 *  from its workspaceId at run time — fresh record read, so a moved
+	 *  session merges into its NEW workspace's ledgers. Absent (tests) =
+	 *  every run rides `deps.graphStore` unchanged (byte-identical pre-Phase-4
+	 *  behavior). A refusing no-op store for Unsorted sessions is the
+	 *  composition root's call (decision 9), not this module's. */
+	resolveGraphStoreForChat?: (chatId: string) => GraphStore | null;
+	/** THE notes-import workspace seam (Phase 4, decision 8): importNotes
+	 *  accepts a destination workspace id — the resolver maps it to that
+	 *  workspace's store. Absent = every run rides `deps.graphStore`
+	 *  unchanged (byte-identical pre-Phase-4 behavior). */
+	resolveGraphStoreForWorkspace?: (workspaceId: string | null) => GraphStore;
 }
 
 export interface NotesImportInput {
@@ -767,8 +781,11 @@ export interface ExtractionPipeline {
 	/** The format-agnostic front door (2026-09-13): run the same pipeline
 	 *  over ONE raw notes file. The source id is deterministic per file
 	 *  path, so re-importing the same file re-runs extraction against the
-	 *  same source identity (mappings dedupe by it). */
-	importNotes(input: NotesImportInput): Promise<EmissionStats>;
+	 *  same source identity (mappings dedupe by it).
+	 *  THE WORKSPACE GRAPH (Phase 4, decision 8): an import names its
+	 *  destination workspace — the chosen workspace's store lands the ledgers;
+	 *  absent = the legacy global graph (the import's pre-Phase-4 shape). */
+	importNotes(input: NotesImportInput, workspaceId?: string | null): Promise<EmissionStats>;
 }
 
 /** pi's per-step usage, flattened to the persisted CallUsage fields
@@ -915,6 +932,7 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 		sourceId: string,
 		view: string,
 		batchIds: ReadonlySet<string>,
+		graphStore: GraphStore,
 	): Promise<SessionFindings> {
 		const signal = runningExtractions.get(jobKey)?.controller.signal;
 		signal?.throwIfAborted(); // an abort during a sync gap ends the job here
@@ -949,7 +967,7 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 		return findings;
 	}
 
-	async function audit(jobKey: string, sourceId: string, findings: SessionFindings): Promise<AuditVerdicts> {
+	async function audit(jobKey: string, sourceId: string, findings: SessionFindings, graphStore: GraphStore): Promise<AuditVerdicts> {
 		const signal = runningExtractions.get(jobKey)?.controller.signal;
 		signal?.throwIfAborted(); // an abort during the extract→audit gap ends here
 		const graph = getGraph(graphStore);
@@ -1013,7 +1031,12 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 	 *  or failure: a failed run still spent money, and its partial usage is
 	 *  exactly what the record should show (stats absent = never merged).
 	 *  Idempotent per startedAt (the store dedupes). */
-	function persistRunUsage(jobKey: string, durationMs: number, stats: EmissionStats | undefined): void {
+	function persistRunUsage(
+		jobKey: string,
+		durationMs: number,
+		stats: EmissionStats | undefined,
+		graphStore: GraphStore,
+	): void {
 		const run = runningExtractions.get(jobKey);
 		if (!run) return; // not running (tests driving stages directly)
 		// PER-CHUNK JOBS (owner, 2026-09-28): the registry KEY may carry a
@@ -1046,16 +1069,17 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 	 *  kills its siblings). */
 	async function runJob(
 		source: { id: string; kind: "chat" | "notes"; label?: string; part?: { i: number; n: number } },
+		resolvedGraph: GraphStore,
 		body: (jobKey: string) => Promise<EmissionStats>,
 	): Promise<EmissionStats> {
 		const jobKey = source.part ? `${source.id}#${source.part.i}` : source.id;
 		const t0 = performance.now();
 		try {
 			const stats = await body(jobKey);
-			persistRunUsage(jobKey, Math.round(performance.now() - t0), stats);
+			persistRunUsage(jobKey, Math.round(performance.now() - t0), stats, resolvedGraph);
 			return stats;
 		} catch (err) {
-			persistRunUsage(jobKey, Math.round(performance.now() - t0), undefined);
+			persistRunUsage(jobKey, Math.round(performance.now() - t0), undefined, resolvedGraph);
 			throw err;
 		} finally {
 			finishExtraction(jobKey);
@@ -1097,13 +1121,39 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 		return stats;
 	}
 
+	/** The workspace seam's refusal (Phase 4): a resolver-null store (a vanished
+	 *  chat) or the Unsorted refusing store — the run ends as AbortError (the
+	 *  deletion guard's existing path: nothing merged, partial usage kept), so
+	 *  fan-out isolation never logs an unsorted-straddling bug as a failure. */
+	function resolveRefused(err: unknown): boolean {
+		return err instanceof Error && err.message.includes(WORKSPACE_GRAPH_REFUSAL);
+	}
+
+	/** THE refusal mint (Phase 4, decision 9): the Unsorted session's store is
+	 *  the composition root's refusing no-op — minted HERE, before any model
+	 *  call or ledger write, so the run ends as AbortError with nothing spent
+	 *  and nothing written. Same text the refused store itself throws
+	 *  (src/core/workspace-refusal.ts, one source of truth). */
+	function refusedChatRun(chatId: string): Error {
+		const err = new Error(`session ${chatId} ${WORKSPACE_GRAPH_REFUSAL}`);
+		err.name = "AbortError";
+		return err;
+	}
+
+	/** Is this store the composition root's refused no-op? THE structural seal
+	 *  (GraphStore.refused): identity/function comparison misclassifies resolved
+	 *  stores, probing throws side effects — the marker is the honest check. */
+	function isRefusedStore(graph: GraphStore): boolean {
+		return graph.refused === true;
+	}
+
 	async function runExtraction(chatId: string): Promise<EmissionStats> {
 		if (inFlight.has(chatId)) return { nodes: 0, chains: 0 };
 		inFlight.add(chatId);
 		const t0 = performance.now();
 		// COVERAGE (vision-extraction-coverage.md, 2026-09-15): extract ONLY
 		// what the per-chat coverage ledger doesn't already hold — never the
-		// whole session. Batches are token-budgeted runs of the oldest
+	// whole session. Batches are token-budgeted runs of the oldest
 		// uncovered messages; each merged batch checkpoints its messages'
 		// coverage ATOMICALLY (inside the merger's step 4), so an abort or
 		// error below loses at most the in-flight batch — every earlier
@@ -1111,12 +1161,21 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 		try {
 			const record = chatStore.getChat(chatId);
 			if (!record) throw new Error(`Chat not found: ${chatId}`);
+			// THE WORKSPACE GRAPH (Phase 4): the session's graph store resolves
+			// from its workspaceId — fresh record read here; absent seam (tests)
+			// = deps.graphStore unchanged. Unsorted → the refused no-op below.
+			const wsGraph = deps.resolveGraphStoreForChat?.(chatId) ?? graphStore;
+			if (wsGraph === null) {
+				console.info(`[extraction ${chatId}] chat record vanished mid-run — no-op`);
+				return { nodes: 0, chains: 0 };
+			}
+			const runRefused = isRefusedStore(wsGraph) ? refusedChatRun(chatId) : null;
 			// BYOK per-need gate (owner, 2026-09-22) + key presence
 			// (2026-09-25): the write channel needs extractor + auditor
 			// engines AND their providers' keys; a refusal lands BEFORE any
 			// stage runs (typed — the trigger skips, routes surface 503).
 			refuseIfStagesUnready();
-			const covered = coverageOf(record.messages, graphStore.readCoverage(), chatId);
+			const covered = coverageOf(record.messages, wsGraph.readCoverage(), chatId);
 			const failedOutputCalls = failedOutputCallIds(record.messages);
 			if (covered.uncovered.length === 0) {
 				console.info(`[extraction ${chatId}] nothing uncovered — no-op`);
@@ -1146,7 +1205,7 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 				try {
 					settled.push({
 						status: "fulfilled",
-						value: await runJob({ id: chatId, kind: "chat", part }, async (jobKey) => {
+						value: await runJob({ id: chatId, kind: "chat", part }, wsGraph, async (jobKey) => {
 							// The batch's source view: TEACHER PROSE ONLY (owner,
 							// 2026-09-28), each passage labeled with its ACTUAL message
 							// id (2026-10-13) — the view lines ARE the coverage
@@ -1163,9 +1222,10 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 								messages.filter((m) => messageViewLines(m, m.id, failedOutputCalls).length > 0).map((m) => m.id),
 							);
 							setPhase(jobKey, "queued", "chat", undefined, part);
+							if (runRefused) throw runRefused;
 							const findings = await withExtractSlot(jobKey, async () => {
 								setPhase(jobKey, "extracting", "chat", undefined, part);
-								return extract(jobKey, chatId, view, batchIds);
+								return extract(jobKey, chatId, view, batchIds, wsGraph);
 							});
 							// SERIALIZED AUDIT (owner, 2026-09-28): audit + merge are the
 							// graph-mutating critical section — one job at a time,
@@ -1173,7 +1233,7 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 							// stands AFTER every earlier job's merge.
 							return withAuditLock(jobKey, "chat", undefined, async () => {
 								setPhase(jobKey, "auditing", "chat", undefined, part);
-								const auditResult = await audit(jobKey, chatId, findings);
+								const auditResult = await audit(jobKey, chatId, findings, wsGraph);
 								setPhase(jobKey, "merging", "chat", undefined, part);
 								// SESSION-DELETION GUARD (wave 6): a chat deleted mid-run must never
 								// merge. The deletion route aborts this run first and runs its purge
@@ -1190,15 +1250,15 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 								// merges in), the stored fingerprint won't match its new
 								// one and it re-opens: honest by construction.
 								const foldedAt = new Date().toISOString();
-								const batchStats = mergeFindings(chatId, findings, auditResult, { chatStore, graphStore }, {
+								const batchStats = mergeFindings(chatId, findings, auditResult, { chatStore, graphStore: wsGraph }, {
 									foldedAt,
 									coverage: batch
 										.filter((slot) => slot.tokens > 0)
 										.map((slot) => ({ chatId, fp: slot.fp, tokens: slot.tokens, foldedAt })),
 								});
-								// The layout ledger evolves with the merge (sync — the
+							// The layout ledger evolves with the merge (sync — the
 								// next snapshot fetch must already reflect the new nodes).
-								settleGraphLayout(graphStore);
+								settleGraphLayout(wsGraph);
 								console.info(
 									`[extraction ${jobKey}] merged: ${batchStats.nodes} nodes, ${batchStats.chains ?? 0} chains`,
 								);
@@ -1216,6 +1276,11 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 				}
 			}
 			const stats = aggregateJobs(chatId, settled);
+			if (settled.some((r) => r.status === "rejected" && resolveRefused(r.reason))) {
+				console.info(
+					`[extraction ${chatId}] skipped — session has no workspace graph destination (Unsorted writes nothing, decision 9)`,
+				);
+			}
 			console.info(
 				`[extraction ${chatId}] merged: ${stats.nodes} nodes, ${stats.chains ?? 0} chains ` +
 					`(${Math.round(performance.now() - t0)}ms total, ${batches.length} batch job(s))`,
@@ -1268,6 +1333,7 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 	async function notesExtract(
 		jobKey: string,
 		input: { id: string; filePath: string; text: string; part?: { i: number; n: number } },
+		graphStore: GraphStore,
 	): Promise<NotesFindings> {
 		// jobKey (per-chunk jobs, owner 2026-09-28): the registry key —
 		// "src#i" for chunk jobs — so the abort signal reaches the call.
@@ -1303,7 +1369,13 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 	// The notes auditor is the SAME identity-linker as the chat one (one
 	// schema now that attribution is gone) — audit() above, verbatim.
 
-	async function runNotesExtraction(input: { id: string; filePath: string; text: string; importedAt: string }): Promise<EmissionStats> {
+	async function runNotesExtraction(input: {
+		id: string;
+		filePath: string;
+		text: string;
+		importedAt: string;
+		graphStore: GraphStore;
+	}): Promise<EmissionStats> {
 		const { id } = input;
 		// importNotes owns the source exclusion, including metadata and cleanup.
 		const t0 = performance.now();
@@ -1339,12 +1411,12 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 				try {
 					settled.push({
 						status: "fulfilled",
-						value: await runJob({ id, kind: "notes", label: input.filePath, part }, async (jobKey) => {
+						value: await runJob({ id, kind: "notes", label: input.filePath, part }, input.graphStore, async (jobKey) => {
 							setPhase(jobKey, "queued", "notes", input.filePath, part);
 							chunkSignal = runningExtractions.get(jobKey)?.controller.signal;
 							const findings = await withExtractSlot(jobKey, async () => {
 								setPhase(jobKey, "extracting", "notes", input.filePath, part);
-								return notesExtract(jobKey, { ...input, text: chunk, part });
+								return notesExtract(jobKey, { ...input, text: chunk, part }, input.graphStore);
 							});
 							// SERIALIZED AUDIT (owner, 2026-09-28): audit + merge one
 							// at a time, process-wide — the auditor explores the graph
@@ -1352,13 +1424,13 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 							// per chunk so cross-source runs interleave fairly.
 							return withAuditLock(jobKey, "notes", input.filePath, async () => {
 								setPhase(jobKey, "auditing", "notes", input.filePath, part);
-								const auditResult = await audit(jobKey, input.id, findings);
+								const auditResult = await audit(jobKey, input.id, findings, input.graphStore);
 								setPhase(jobKey, "merging", "notes", input.filePath, part);
 								const merged = mergeFindings(
 									id,
 									findings,
 									auditResult,
-									{ chatStore, graphStore },
+									{ chatStore, graphStore: input.graphStore },
 									{ foldedAt: input.importedAt },
 								);
 								// Capture the committed merge BEFORE layout/usage can fail.
@@ -1368,7 +1440,7 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 									mergedStats.droppedChains = (mergedStats.droppedChains ?? 0) + merged.droppedChains;
 								// The layout ledger evolves with each merge — the next
 								// snapshot fetch reflects every finished chunk.
-								settleGraphLayout(graphStore);
+								settleGraphLayout(input.graphStore);
 								console.info(`[extraction ${jobKey}] merged: ${merged.nodes} nodes, ${merged.chains ?? 0} chains`);
 								return merged;
 							});
@@ -1417,15 +1489,22 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 
 	/** Every explicit import processes the whole file. Identity, source digest,
 	 * auditor and usage history remain source-scoped; this is not exactly-once. */
-	async function importNotes(input: NotesImportInput): Promise<EmissionStats> {
+	async function importNotes(input: NotesImportInput, workspaceId?: string | null): Promise<EmissionStats> {
 		const id = `src_${crypto.createHash("sha256").update(input.filePath).digest("hex").slice(0, 12)}`;
 		// Acquire BEFORE source upsert: overlapping contents must not alter metadata.
 		if (inFlight.has(id)) throw new NotesImportError("busy", { nodes: 0, chains: 0 }, "This file is already being imported. Try again when it finishes.");
 		inFlight.add(id);
 		try {
+			// THE WORKSPACE GRAPH (Phase 4): the destination store resolves from
+			// the import's chosen workspace — absent seam / absent id = the
+			// legacy deps.graphStore (byte-identical pre-Phase-4 behavior).
+			const notesGraph =
+				workspaceId !== undefined && deps.resolveGraphStoreForWorkspace
+					? deps.resolveGraphStoreForWorkspace(workspaceId)
+					: graphStore;
 			const importedAt = new Date().toISOString();
-			graphStore.upsertSource({ id, filePath: input.filePath, importedAt });
-			return await runNotesExtraction({ id, ...input, importedAt });
+			notesGraph.upsertSource({ id, filePath: input.filePath, importedAt });
+			return await runNotesExtraction({ id, ...input, importedAt, graphStore: notesGraph });
 		} catch (err) {
 			if (err instanceof NotesImportError || err instanceof ModelsNotConfiguredError || err instanceof ProviderKeyMissingError) throw err;
 			throw new NotesImportError("failed", { nodes: 0, chains: 0 }, err instanceof Error ? err.message : String(err), { cause: err });

@@ -25,6 +25,10 @@ export const PATHS = {
 	data: DATA_ROOT,
 	/** Chat sessions (AI SDK UIMessage transcripts, one JSON file per chat). */
 	chats: path.join(DATA_ROOT, "chats"),
+	/** Workspaces (workspace wave, 2026-10-28): one directory per workspace —
+	 *  meta.json (the WorkspaceRecord) + graph/ (the workspace's own ledgers,
+	 *  wired in Phase 4 of docs/workspaces.md). */
+	workspaces: path.join(DATA_ROOT, "workspaces"),
 	graph: path.join(DATA_ROOT, "graph"),
 	/** Debug artifacts (env-gated): data/debug/provider-events/<chatId>.jsonl
 	 * raw provider stream recordings (src/agent/provider-events.ts). */
@@ -92,6 +96,54 @@ export const RENDER_SETTINGS_FILE = path.join(PATHS.graph, "render-settings.json
  *  graph-family write creates it. positions.json is REBUILDABLE and rides
  *  along unversioned by design (owner ruling). */
 export const GRAPH_FORMAT_FILE = path.join(PATHS.graph, "format.json");
+
+// ─── per-workspace graph (workspace wave Phase 4, docs/workspaces.md) ───────
+
+/** Every workspace id in the store's minted shape ("ws_" + ts36 + rand8) —
+ *  the SAME guard src/store/workspaces.ts uses on its paths. A graph store
+ *  built from an unvalidated id could path-travel out of data/workspaces;
+ *  graphFilesFor refuses loudly (defense in depth: callers resolve ids only
+ *  through the workspace store, which pins this shape at mint time). */
+export const WORKSPACE_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+
+/** The workspace's own graph directory (decision 8: `graph/` lives INSIDE
+ *  the workspace folder): data/workspaces/<id>/graph. */
+export function workspaceGraphDir(workspaceId: string): string {
+	if (! WORKSPACE_ID_PATTERN.test(workspaceId) || workspaceId === "." || workspaceId === "..") {
+		throw new Error(`Unsafe workspace id: ${JSON.stringify(workspaceId)}`);
+	}
+	return path.join(PATHS.workspaces, workspaceId, "graph");
+}
+
+/** THE per-graph-directory file family (Phase 4 factory seam): one GraphFiles
+ *  per data dir — the legacy global graph (PATHS.graph, decision: stays
+ *  where it is) and every workspace's own dir. src/store/graph.ts
+ *  (createGraphStore) consumes this shape and NOTHING else: every adapter
+ *  read/write goes through a GraphFiles, so a store instance can NEVER
+ *  straddle two directories. */
+export interface GraphFiles {
+	nodes: string;
+	chains: string;
+	sessions: string;
+	coverage: string;
+	positions: string;
+	sources: string;
+	renderSettings: string;
+	format: string;
+}
+
+export function graphFilesForDir(dir: string): GraphFiles {
+	return {
+		nodes: path.join(dir, "nodes.jsonl"),
+		chains: path.join(dir, "chains.jsonl"),
+		sessions: path.join(dir, "sessions.jsonl"),
+		coverage: path.join(dir, "coverage.jsonl"),
+		positions: path.join(dir, "positions.json"),
+		sources: path.join(dir, "sources.json"),
+		renderSettings: path.join(dir, "render-settings.json"),
+		format: path.join(dir, "format.json"),
+	};
+}
 
 /**
  * THE USER SETTINGS RECORD (settings-storage wave, 2026-09-19): one

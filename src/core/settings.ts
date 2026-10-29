@@ -305,10 +305,15 @@ export const ROLE_SLOT: Readonly<Record<ModelRole, ModelSlotName>> = {
 };
 
 /** General settings — app-level behavior. Version DISPLAY and plans login
- *  live outside the record (package.json / auth.json) by owner decision. */
+ *  live outside the record (package.json / auth.json) by owner decision.
+ *
+ *  No updater since 2026-10-29 (owner ruling): automatic updates were removed
+ *  wholesale — an installed build silently self-updated over the baked
+ *  upstream feed and replaced local rebuilds. Updates are purely manual; a
+ *  retired `autoUpdate` key on disk drops instead of riding (see
+ *  sanitizeUserSettings). */
 export interface GeneralSettings {
-	/** Automatic startup/24h update checks (default ON). Manual checks bypass this. */
-	autoUpdate?: boolean;
+	[key: string]: unknown;
 }
 
 /** One app-wide dictation preference, shared by every composer. */
@@ -462,7 +467,7 @@ export interface UserSettings {
  *  prompts default off — hence their absence here. */
 export interface FactorySettings {
 	version: number;
-	general: Required<GeneralSettings>;
+	general?: GeneralSettings;
 	dictation: Required<DictationSettings>;
 	appearance: {
 		mode: "dark" | "light";
@@ -482,7 +487,7 @@ export interface FactorySettings {
 
 export const FACTORY_SETTINGS: FactorySettings = {
 	version: CURRENT_SETTINGS_VERSION,
-	general: { autoUpdate: true },
+	general: {},
 	dictation: { language: "en" },
 	appearance: {
 		mode: "dark",
@@ -525,10 +530,10 @@ const boolOrDrop = (value: unknown): boolean | undefined =>
 	typeof value === "boolean" ? value : undefined;
 
 function sanitizeGeneral(raw: Record<string, unknown>): GeneralSettings {
-	const out: GeneralSettings = {};
-	const autoUpdate = boolOrDrop(raw.autoUpdate);
-	if (autoUpdate !== undefined) out.autoUpdate = autoUpdate;
-	return out;
+	// No known fields remain: the retired `autoUpdate` (and any future
+	// general key) rides the verbatim unknown-key passthrough in
+	// sanitizeUserSettings. Keeping the section alive preserves its siblings.
+	return { ...raw };
 }
 
 const THINKING_LEVELS: readonly ThinkingLevel[] = [
@@ -733,6 +738,10 @@ export function sanitizeUserSettings(raw: unknown): UserSettings | null {
 	};
 	if (r.general !== null && typeof r.general === "object" && !Array.isArray(r.general)) {
 		out.general = sanitizeGeneral(r.general as Record<string, unknown>);
+		// The retired auto-update setting (owner ruling, 2026-10-29): the
+		// updater is gone wholesale — a fossil `autoUpdate` on disk must never
+		// resurrect through reads (same rule as the dead `chat` section below).
+		delete out.general.autoUpdate;
 	}
 	if (r.dictation !== undefined) {
 		const raw = r.dictation;

@@ -13,6 +13,7 @@
  * healthy. The dock's chips + graph refetch track progress live through
  * /api/graph/status, as with session runs.
  */
+import { WORKSPACE_ID_PATTERN } from "@/config";
 import { extraction, NotesImportError } from "@/src/server";
 import {
 	ModelsNotConfiguredError,
@@ -46,9 +47,18 @@ export async function POST(request: Request) {
 	if (files.length === 0) {
 		return Response.json({ results: [] as ImportResult[], error: "no files" }, { status: 400 });
 	}
+	// THE WORKSPACE GRAPH (Phase 4, decision 8): the import's chosen workspace
+	// id (field "workspace", sent by the picker) — absent = the legacy global
+	// graph (the import flow pre-Phase-4 shape). Validated: an unknown id
+	// refuses honestly, a malformed one 400s.
+	const workspaceField = form.get("workspace");
+	if (typeof workspaceField === "string" && workspaceField !== "" && !WORKSPACE_ID_PATTERN.test(workspaceField)) {
+		return Response.json({ results: [] as ImportResult[], error: "invalid workspace" }, { status: 400 });
+	}
 
 	const results: ImportResult[] = [];
 	const queue = files.map((file, requestIndex) => ({ file, requestIndex }));
+	const workspaceId = typeof workspaceField === "string" && workspaceField !== "" ? workspaceField : undefined;
 	const workers = Array.from({ length: Math.min(3, files.length) }, async () => {
 		for (;;) {
 			const next = queue.shift();
@@ -56,7 +66,7 @@ export async function POST(request: Request) {
 			const { file, requestIndex } = next;
 			try {
 				const text = await file.text();
-				const stats = await extraction.importNotes({ filePath: file.name, text });
+				const stats = await extraction.importNotes({ filePath: file.name, text }, workspaceId);
 				results.push({ filePath: file.name, requestIndex, outcome: "completed", ok: true, stats });
 			} catch (err) {
 				if (err instanceof ModelsNotConfiguredError) {

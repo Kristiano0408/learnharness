@@ -21,7 +21,7 @@
 import type { Position } from "../core/contracts.ts";
 import { deriveView, getGraph } from "../core/graph.ts";
 import { settleGraphLayout } from "../core/layout-settle.ts";
-import { stores } from "./stores.ts";
+import { graphStoresForChat, stores } from "./stores.ts";
 
 /** Max |x| or |y| accepted — NaN/Infinity clamp here, absurd too. */
 const MAX_COORD = 1e6;
@@ -31,15 +31,22 @@ const MAX_COORD = 1e6;
  * sanitized positions actually persisted (empty object = nothing written,
  * e.g. a body with no known ids — the caller reports but never fails).
  */
-export function commitPositions(input: unknown): Record<string, Position> {
+export function commitPositions(input: unknown, workspaceId?: string): Record<string, Position> {
 	if (typeof input !== "object" || input === null) return {};
 	const raw = input as Record<string, unknown>;
+
+	// THE WORKSPACE SELECTOR (Phase 6): the ledger family this commit rides —
+	// absent/"global" = legacy global (today's default), id = that workspace.
+	const graphStore =
+		workspaceId === undefined || workspaceId === "global"
+			? stores.graphStore
+			: graphStoresForChat.forWorkspace(workspaceId);
 
 	// Only ids the canvas's world actually has: stored propositions plus
 	// the DERIVED arg_ implication nodes (deriveView of the current graph
 	// — the same derivation the snapshot serves, so ids agree by
 	// construction).
-	const known = new Set(deriveView(getGraph(stores.graphStore)).nodes.map((n) => n.id));
+	const known = new Set(deriveView(getGraph(graphStore)).nodes.map((n) => n.id));
 
 	const positions: Record<string, Position> = {};
 	for (const [id, value] of Object.entries(raw)) {
@@ -55,7 +62,7 @@ export function commitPositions(input: unknown): Record<string, Position> {
 	}
 	if (Object.keys(positions).length === 0) return {};
 
-	stores.graphStore.writePositions(positions);
+	graphStore.writePositions(positions);
 
 	// The graph grew past what the client knew (a merge landed mid-drag):
 	// absorb the new nodes with the client's rest state as anchors. The
@@ -64,7 +71,7 @@ export function commitPositions(input: unknown): Record<string, Position> {
 	// comparison broke once args counted as persistable).
 	for (const id of known) {
 		if (!(id in positions)) {
-			settleGraphLayout(stores.graphStore);
+			settleGraphLayout(graphStore);
 			break;
 		}
 	}

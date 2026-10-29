@@ -65,7 +65,12 @@ export * from "./dictation.ts";
 // two type-only things from it: the ChatDeleteMode union (the delete
 // dialog's two-option design + the DELETE query param) and the stats
 // shape its success line describes, hence this type-only re-export.
+// The move seam rides the same module (workspace wave Phase 5): the
+// TAKE/LAND pair is pure but storage-port driven — server-side only; the
+// shell needs exactly the ChatMoveMode union for the A3 checkbox design +
+// the route's `mode` param. The stats/delta shapes stay server-side.
 export type { ChatDeleteMode, ChatDeletionStats } from "./graph-deletion.ts";
+export type { ChatMoveMode } from "./graph-deletion.ts";
 export * from "./settings-resolution.ts";
 export * from "./search.ts"; // search port (search wave, 2026-09-20)
 export * from "./session-find.ts";
@@ -81,3 +86,6 @@ export * from "./coverage.ts";
 // ONE session→markdown formatter — the extractor's view and the user-facing
 // export share it. Pure, browser-safe.
 export * from "./session-markdown.ts";
+// workspace-groups.ts (workspace wave Phase 3, 2026-10-28): the sidebar's
+// section fold + the per-section kind-filter map — pure, browser-safe.
+export * from "./workspace-groups.ts";

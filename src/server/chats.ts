@@ -4,7 +4,7 @@ import { coverageOf } from "../core/coverage.ts";
 import { deleteChatTraces, type ChatDeleteMode, type ChatDeletionStats } from "../core/graph-deletion.ts";
 import { titleFromPrompt } from "../core/contracts.ts";
 import { graphRevision } from "./graph.ts";
-import { stores } from "./stores.ts";
+import { graphStoreForChatRead, graphStoresForChat, stores } from "./stores.ts";
 import { isTurnRunning } from "./turn-liveness.ts";
 import { clearTurnFailure } from "./turn-runs.ts";
 import { discardChatDeliveries } from "./jobs.ts";
@@ -96,7 +96,8 @@ function runningWorkBlocker(chatId: string): Extract<ChatDeleteOutcome, { status
 }
 
 export async function deleteChatSession(chatId: string, mode: ChatDeleteMode): Promise<ChatDeleteOutcome> {
-	if (!stores.chatStore.getChat(chatId)) {
+	const chat = stores.chatStore.getChat(chatId);
+	if (!chat) {
 		return { ok: false, status: 404, code: "not_found", error: "No such session" };
 	}
 	const blocker = runningWorkBlocker(chatId);
@@ -124,13 +125,26 @@ export async function deleteChatSession(chatId: string, mode: ChatDeleteMode): P
 
 	// THE SYNC BLOCK — no awaits below (see the doc comment). Order:
 	// ledgers → jobs → the chat record.
-	const stats = deleteChatTraces(stores.graphStore, chatId, mode);
+	// THE WORKSPACE GRAPH (Phase 4): a session WITH a workspace purges its own
+	// workspace's ledgers (a moved session's traces live there); an UNSORTED
+	// session rides the legacy global store — exactly where pre-Phase-4
+	// sessions' traces live (decision 9: new Unsorted sessions write nothing,
+	// so the legacy read is their only possible home too) — and keeps the
+	// byte-identical pre-Phase-4 behavior for every existing session.
+	const graph = graphStoreForChatRead(chatId) ?? stores.graphStore;
+	const stats = deleteChatTraces(graph, chatId, mode);
 	const jobsRemoved = stores.jobStore.deleteJobsForChat(chatId);
 	if (stores.chatStore.deleteChat(chatId)) {
 		discardChatDeliveries(chatId);
 		clearTurnFailure(chatId);
 	}
-	return { ok: true, mode, stats, jobsRemoved, graphRevision: graphRevision() };
+	// THE STAMP SCOPE (Phase 6): the stamp names the graph directory the purge
+	// happened IN — a workspace session's stamp is its own workspace's; an
+	// Unsorted session rode the legacy global store and keeps the legacy
+	// stamp (byte-identical pre-Phase-6 behavior). The sidebar announces it
+	// scoped so the right graph view refreshes.
+	const purgeScope = chat.workspaceId;
+	return { ok: true, mode, stats, jobsRemoved, graphRevision: graphRevision(purgeScope) };
 }
 
 /** One session's coverage read (extraction-UX redesign, owner dispatch
@@ -160,7 +174,11 @@ export interface SessionCoverage {
 export function sessionCoverage(chatId: string): SessionCoverage | null {
 	const record = stores.chatStore.getChat(chatId);
 	if (!record) return null;
-	const entries = stores.graphStore.readCoverage();
+	// THE WORKSPACE GRAPH (Phase 4): the meter rides the session's own store —
+	// a workspace session reads its ledger; an unsorted session the legacy
+	// global one (the coverage a pre-Phase-4 session could have).
+	const coverGraph = record.workspaceId !== undefined ? graphStoresForChat.forWorkspace(record.workspaceId) : stores.graphStore;
+	const entries = coverGraph.readCoverage();
 	// Wave B: the record is native history — coverage reads through the
 	// projection (same view the extraction pipeline folds).
 	const cov = coverageOf(record.messages, entries, chatId);

@@ -11,10 +11,10 @@ import { SetupDialog } from "@/components/setup-dialog";
 import { useModelSetup, selectedModelUnavailable, openModelPicker, ZeroKeysPill } from "@/components/setup-cta";
 import { StatsBar } from "@/components/stats-bar";
 import { ChainTableOverlay } from "@/components/chain-table.tsx";
-import { ComposerActions, NodePickerControl } from "@/components/composer-actions";
+import { ComposerActions, NodePickerControl, WorkspaceChip } from "@/components/composer-actions";
 import { OPENING_PROMPT_FAILURE } from "@/components/opening-prompt";
 import { SessionStarter } from "@/components/start-session";
-import type { ChatSettings, GraphSnapshot } from "@/src/core";
+import { DRAFT_WORKSPACE_KEY, UNSORTED_KEY, type ChatSettings, type GraphSnapshot, type WorkspaceListItem } from "@/src/core";
 
 /** The draft's pick set (owner round 10): the SAME shape the home pick
  *  bar lifts — resolved nodes as the learner SAW them at pick time. */
@@ -47,6 +47,7 @@ export async function startDraftSession(
 	picks?: readonly DraftPick[],
 	starter = new SessionStarter(),
 	settingsIdentity?: string,
+	workspaceId?: string,
 ): Promise<string | null> {
 	const t = text.trim();
 	if (!t) return null;
@@ -54,10 +55,12 @@ export async function startDraftSession(
 	// from the pick bar creates its session WITH the graph context — the
 	// same contract as the home screen's practice send (the marker with
 	// [id] name: statement lines, target validation's truth set).
+	// The filing rides the create too (workspace wave Phase 3).
+	const filing = workspaceId !== undefined ? { workspaceId } : {};
 	return starter.start(
 		mode === "practice"
-			? { title: t, kind: "practice", ...(picks && picks.length > 0 ? { graphContext: { propositions: picks } } : {}) }
-			: { title: t },
+			? { title: t, kind: "practice", ...filing, ...(picks && picks.length > 0 ? { graphContext: { propositions: picks } } : {}) }
+			: { title: t, ...filing },
 		fetchLike,
 		settingsIdentity,
 	);
@@ -80,6 +83,7 @@ export function DraftShell({
 	onOpenPicker,
 	onClearPicks,
 	overlay,
+	workspaceChip,
 }: {
 	busy: boolean;
 	text: string;
@@ -107,6 +111,10 @@ export function DraftShell({
 	 *  the graph view (the overlay fills its column, never the sidebar).
 	 *  Passed as a node so the pick state stays in NewSession. */
 	overlay?: ReactNode;
+	/** THE WORKSPACE CHIP (workspace wave Phase 3, decision 3C): the
+	 *  draft's filing control — passed by NewSession, which owns the
+	 *  workspace list and the persisted filing choice. */
+	workspaceChip?: ReactNode;
 }) {
 	// Voice dictation (STT wave, 2026-09-17): finals append at the end of the
 	// draft text (via the parent's onChange — the truth lives there); the
@@ -183,9 +191,18 @@ export function DraftShell({
 						<div className="bg-background pb-4">
 							<div className={DOCK}>
 								<ComposerActions
-									picker={(picks.length > 0 || mode === "practice") && (
-										<NodePickerControl count={picks.length} onOpen={onOpenPicker} onClear={onClearPicks} />
-									)}
+									picker={
+										picks.length > 0 || mode === "practice" || workspaceChip ? (
+											<>
+												{(picks.length > 0 || mode === "practice") && (
+													<NodePickerControl count={picks.length} onOpen={onOpenPicker} onClear={onClearPicks} />
+												)}
+												{workspaceChip}
+											</>
+										) : (
+											false
+										)
+									}
 									setup={setupCta}
 								/>
 								{startError && <p role="alert" className="pointer-events-auto mb-2 text-sm text-destructive">{OPENING_PROMPT_FAILURE}</p>}
@@ -256,6 +273,28 @@ export function NewSession({ initialConfigured, mode = "teach" }: { initialConfi
 	};
 	const [pickerOpen, setPickerOpen] = useState(false);
 	const [snapshot, setSnapshot] = useState<GraphSnapshot | null>(null);
+	/* THE FILING CHIP (workspace wave Phase 3, decision 3C): the draft's
+	 * workspace choice — default = the last picked workspace (persisted),
+	 *   absent = Unsorted. The workspace list rides a lazy fetch (the
+	 *   chip needs it; a failed fetch leaves the draft usable, Unsorted
+	 *   only). */
+	const [workspaces, setWorkspaces] = useState<WorkspaceListItem[]>([]);
+	const [filing, setFiling] = useState<string>(UNSORTED_KEY);
+	useEffect(() => {
+		const stored = window.localStorage.getItem(DRAFT_WORKSPACE_KEY);
+		if (stored) setFiling(stored);
+		void fetch("/api/workspaces")
+			.then((r) => r.json() as Promise<{ workspaces: WorkspaceListItem[] }>)
+			.then((d) => setWorkspaces(d.workspaces))
+			.catch(() => {
+				/* an unreachable list leaves the draft usable — Unsorted */
+			});
+	}, []);
+	const applyFiling = useCallback((key: string) => {
+		setFiling(key);
+		if (key === UNSORTED_KEY) window.localStorage.removeItem(DRAFT_WORKSPACE_KEY);
+		else window.localStorage.setItem(DRAFT_WORKSPACE_KEY, key);
+	}, []);
 	const openPicker = () => {
 		if (snapshot) {
 			setPickerOpen(true);
@@ -306,7 +345,7 @@ export function NewSession({ initialConfigured, mode = "teach" }: { initialConfi
 		setBusy(true);
 		setStartError(false);
 		void startDraftSession(draft, fetch, mode === "practice" ? "practice" : undefined, mode === "practice" ? picksRef.current : undefined,
-			starterRef.current, JSON.stringify(catalog?.slots.strong))
+			starterRef.current, JSON.stringify(catalog?.slots.strong), filing === UNSORTED_KEY ? undefined : filing)
 			.then((target) => {
 				if (target) router.push(target);
 				else { startingRef.current = false; setBusy(false); }
@@ -316,7 +355,7 @@ export function NewSession({ initialConfigured, mode = "teach" }: { initialConfi
 				setBusy(false);
 				setStartError(true);
 			});
-	}, [router, configured, zeroKeys, catalog, mode]);
+	}, [router, configured, zeroKeys, catalog, mode, filing]);
 
 	return (
 		<>
@@ -330,6 +369,9 @@ export function NewSession({ initialConfigured, mode = "teach" }: { initialConfi
 				picks={picks}
 				onOpenPicker={openPicker}
 				onClearPicks={() => applyPicks([])}
+				workspaceChip={
+					<WorkspaceChip workspaces={workspaces} value={filing} onChange={applyFiling} />
+				}
 				overlay={
 					// THE PICKER (owner round 10b): hosted INSIDE the content
 					// column — absolute inset-0 resolves to the column's relative

@@ -588,6 +588,16 @@ function RowCheckbox({
 	);
 }
 
+/** The scoped deletion announcement (Phase 6, export pure pin): every node
+ *  death in the chain table ends with an `lh:graph-revision` stamp riding the
+ *  graph the deaths happened IN — a selected workspace carries its scope;
+ *  absent = the legacy global graph's stamp. Exported pure for SSR pins. */
+export function announceScopedRevision(graphRevision: number, workspaceId?: string | null): void {
+	window.dispatchEvent(
+		new CustomEvent("lh:graph-revision", { detail: { revision: graphRevision, scope: workspaceId ?? null } }),
+	);
+}
+
 /** The graph view's overlay wrapper: owns query + sort + selection +
  *  expansion; mounts ABSOLUTE INSIDE the
  *  graph area, full-bleed (owner ruling: the translucent blurred surface
@@ -609,6 +619,7 @@ export function ChainTableOverlay({
 	selectMode,
 	controlledSelection,
 	onSelectionChange,
+	workspaceId,
 }: {
 	open: boolean;
 	nodes: GraphNode[];
@@ -619,6 +630,10 @@ export function ChainTableOverlay({
 	selectMode?: boolean;
 	controlledSelection?: ReadonlySet<string>;
 	onSelectionChange?: (next: ReadonlySet<string>) => void;
+	/** THE GRAPH SCOPE (Phase 6): which graph the chain table's node deaths
+	 *  ride — forwarded to DeleteNodeDialog so every DELETE hits the right
+	 *  ledgers; null/absent = the legacy global graph. */
+	workspaceId?: string | null;
 }) {
 	const [query, setQuery] = useState("");
 	const [sort, setSort] = useState<ChainSort>({ col: "name", dir: 1 });
@@ -712,16 +727,18 @@ export function ChainTableOverlay({
 			{deleteOpen && (
 				<DeleteNodeDialog
 					nodes={selectedNodes.map((n) => ({ id: n.id, name: n.name }))}
+					workspaceId={workspaceId}
 					onClose={() => setDeleteOpen(false)}
 					onDeleted={(deadIds, graphRevision) => {
 						// Close the dialog; prune the dead ids from the
 						// selection (the rest of a big selection survives);
 						// announce the revision so GraphView refetches the
 						// snapshot — fresh nodes/edges flow back in as props.
+						// Phase 6: the stamp rides the graph the deaths happened IN.
 						setDeleteOpen(false);
 						const dead = new Set(deadIds);
 						applySelection(new Set([...selection].filter((id) => !dead.has(id))));
-						window.dispatchEvent(new CustomEvent("lh:graph-revision", { detail: { graphRevision } }));
+						announceScopedRevision(graphRevision, workspaceId);
 					}}
 				/>
 			)}
