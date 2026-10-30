@@ -1456,6 +1456,14 @@ describe("the extractor redesign (owner, 2026-09-30): chains are the deliverable
 		assert.match(EXTRACTION_CORE, /everything derives from the foundations/);
 		assert.match(EXTRACTION_CORE, /build\s+on it\./);
 
+		// THE SOURCE-LANGUAGE RULE (owner, 2026-10-30): the core rides in the
+		// shared core so both front doors carry it — imported Italian notes
+		// mint Italian nodes, established terminology keeps the source's own
+		// language, borrowed terms stay borrowed.
+		assert.match(EXTRACTION_CORE, /the language the source is written in/);
+		assert.match(EXTRACTION_CORE, /established terms\s+stay in the language the source itself uses/);
+		assert.match(EXTRACTION_CORE, /borrowed terms stay borrowed/);
+
 		// Assembly: each front door = its preamble + the shared core.
 		assert.ok(EXTRACTOR_INSTRUCTIONS.startsWith(SESSION_PREAMBLE));
 		assert.ok(EXTRACTOR_INSTRUCTIONS.includes(EXTRACTION_CORE));

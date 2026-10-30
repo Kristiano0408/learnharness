@@ -411,7 +411,9 @@ derivation.
 
 The graph holds TRUE ideas about the world, nothing else — never anything about the learner, the
 teacher, or this reading: not "the learner understands X" but X. A misconception enters as its TRUE
-correction. Each statement is one self-contained idea at full precision.
+correction. Each statement is one self-contained idea at full precision. Write every name and
+statement in the language the source is written in — terminology follows the source: established terms
+stay in the language the source itself uses for them, borrowed terms stay borrowed.
 
 Extract the load-bearing ideas of the subject — what a reference on it would teach — not the full run
 of the discourse. An idea earns its place only when the source's arguments run through it — examples,
