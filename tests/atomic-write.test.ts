@@ -77,9 +77,11 @@ describe("writeFileAtomicSync", () => {
 			if (refusals-- > 0) throw fail("EPERM");
 			return rename(...args);
 		});
+		const warn = t.mock.method(console, "warn", () => {});
 		writeFileAtomicSync(file, "new");
 		assert.equal(fs.readFileSync(file, "utf-8"), "new");
 		assert.deepEqual(temps(file), []);
+		assert.equal(warn.mock.callCount(), 0, "the rename landed; no in-place fallback");
 	});
 
 	it("Windows: new files whose temp is briefly held still land by rename", onWindows, (t) => {
