@@ -52,6 +52,7 @@ import {
 	type GraphFiles,
 } from "../../config.ts";
 import { assertGraphFormat, ensureGraphFormat } from "./graph-format.ts";
+import { writeFileAtomicSync } from "./atomic-write.ts";
 import type {
 	GraphChain,
 	GraphNode,
@@ -358,7 +359,7 @@ function readSourceMap(files: GraphFiles): Record<string, NotesSource> {
 function writeSourceMap(files: GraphFiles, map: Record<string, NotesSource>): void {
 	fs.mkdirSync(path.dirname(files.sources), { recursive: true });
 	ensureGraphFormat(files); // the lazy format stamp (graph-format.ts)
-	fs.writeFileSync(files.sources, JSON.stringify(map, null, "\t"), "utf-8");
+	writeFileAtomicSync(files.sources, JSON.stringify(map, null, "\t"));
 }
 
 // ─── one-way purges per graph directory at factory creation: dead ledgers

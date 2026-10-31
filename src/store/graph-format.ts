@@ -28,6 +28,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { GRAPH_FORMAT_FILE, type GraphFiles } from "../../config.ts";
 import { CURRENT_GRAPH_FORMAT_VERSION } from "../core/contracts/graph.ts";
+import { writeFileAtomicSync } from "./atomic-write.ts";
 
 /** The stamp sidecar of one graph family (config GraphFiles.format). */
 export type FormatHost = Pick<GraphFiles, "format">;
@@ -67,7 +68,7 @@ export function assertGraphFormat(host: Host): void {
 export function ensureGraphFormat(host: Host): void {
 	if (stampedVersion(host) !== null) return;
 	fs.mkdirSync(path.dirname(host.format), { recursive: true });
-	fs.writeFileSync(host.format, JSON.stringify({ version: CURRENT_GRAPH_FORMAT_VERSION }, null, "\t") + "\n", "utf-8");
+	writeFileAtomicSync(host.format, JSON.stringify({ version: CURRENT_GRAPH_FORMAT_VERSION }, null, "\t") + "\n");
 }
 
 /** The legacy global graph dir's host — the module constants (GRAPH_FORMAT_FILE
