@@ -359,7 +359,7 @@ function readSourceMap(files: GraphFiles): Record<string, NotesSource> {
 function writeSourceMap(files: GraphFiles, map: Record<string, NotesSource>): void {
 	fs.mkdirSync(path.dirname(files.sources), { recursive: true });
 	ensureGraphFormat(files); // the lazy format stamp (graph-format.ts)
-	writeFileAtomicSync(files.sources, JSON.stringify(map, null, "\t"));
+	writeFileAtomicSync(files.sources, JSON.stringify(map, null, "\t"), { allowInPlaceFallback: true });
 }
 
 // ─── one-way purges per graph directory at factory creation: dead ledgers

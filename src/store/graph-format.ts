@@ -68,7 +68,7 @@ export function assertGraphFormat(host: Host): void {
 export function ensureGraphFormat(host: Host): void {
 	if (stampedVersion(host) !== null) return;
 	fs.mkdirSync(path.dirname(host.format), { recursive: true });
-	writeFileAtomicSync(host.format, JSON.stringify({ version: CURRENT_GRAPH_FORMAT_VERSION }, null, "\t") + "\n");
+	writeFileAtomicSync(host.format, JSON.stringify({ version: CURRENT_GRAPH_FORMAT_VERSION }, null, "\t") + "\n", { allowInPlaceFallback: true });
 }
 
 /** The legacy global graph dir's host — the module constants (GRAPH_FORMAT_FILE
