@@ -1,7 +1,9 @@
 import { Type } from "typebox";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { serverExecute } from "../tool-execute.ts";
+import { chainsForSelection } from "../../core/chains.ts";
 import { getGraph, graphSessionIndex, graphSessionPropositions } from "../../core/graph.ts";
+import type { GraphNode } from "../../core/contracts/graph.ts";
 import type { ChatStore, GraphStore } from "../../core/ports.ts";
 
 /**
@@ -78,6 +80,82 @@ export function proberGraphTools(ctx: GraphToolContext): Record<string, AgentToo
 	};
 }
 
+// ─── the practitioner's whole-map reader (session-wave fix, 2026-11-03) ─────
+
+/**
+ * THE PRACTITIONER'S `read_graph` (session-wave fix, 2026-11-03): the map
+ * readers the practice agent carries are per-session — without picks the AI
+ * must already know a session id to reach ANY proposition, so it never sees
+ * the workspace's graph whole. This is the ONE-call whole-map read, owned by
+ * the same settings gate as every other map tool (the composition root passes
+ * `graph` only when graphToolsEnabled opens).
+ *
+ * Propositions + stored chains — statements INCLUDED: unlike the prober's
+ * names-only rule (its business is the map's organization), a practice agent
+ * must READ the propositions to pose against them and fill `problem.target`
+ * with real ids. Compactness mirrors the auditor's dump cap.
+ */
+export const PRACTICE_READ_GRAPH_MAX_NODES = 400;
+
+/** The read_graph pin: compact ONE-LINE shape (id + name, no statement) —
+ *  pure + exported for node-test pins. `nodeLine` below is the full-shape
+ *  sibling; this stays minimal so a large map costs little context. */
+export function readGraphNodeNameLine(node: Pick<GraphNode, "id" | "name">): string {
+	return `- ${node.id} :: ${node.name}`;
+}
+
+/** The read_graph pin: the chain line — premise names → conclusion name
+ *  (formatChainLine shape). Unknown ids fall back to the raw id (honest,
+ *  never guessed). Pure + exported for node-test pins. */
+export function readGraphChainLine(
+	chain: Pick<import("../../core/chains.ts").ReasoningChain, "premises" | "conclusion">,
+	propositions: Readonly<Record<string, { name: string }>>,
+): string {
+	const nameOf = (id: string) => propositions[id]?.name ?? id;
+	const premises = [...chain.premises].sort().map(nameOf).join(", ");
+	return premises !== "" ? `- ${premises} → ${nameOf(chain.conclusion)}` : `- ${nameOf(chain.conclusion)} (no premises)`;
+}
+
+export function practitionerGraphTools(ctx: GraphToolContext): Record<string, AgentTool<any>> {
+	const deps = { chatStore: ctx.chatStore, graphStore: ctx.graphStore };
+	return {
+		read_graph: {
+			name: "read_graph",
+			label: "read_graph",
+			description:
+				"Read the learner's ENTIRE knowledge map for this workspace in one call — every proposition (id + name) and every stored reasoning chain (premises → conclusion). " +
+				"Call it whenever a pick-less start needs grounding, or when a `problem` target must be chosen from the map. If the map is too large for one read, this tool says so — then ground through list_sessions and list_propositions.",
+			parameters: Type.Object({}),
+			execute: serverExecute("read_graph", Type.Object({}), async (): Promise<string> => {
+				const graph = getGraph(deps.graphStore);
+				if (graph.nodes.length === 0) return "The knowledge map for this workspace is empty — no proposition exists yet.";
+				if (graph.nodes.length > PRACTICE_READ_GRAPH_MAX_NODES) {
+					return (
+						`The map is too large for one compact read (${graph.nodes.length} propositions, cap ${PRACTICE_READ_GRAPH_MAX_NODES}). ` +
+						`Use list_sessions, then list_propositions per plausibly-related session.`
+					);
+				}
+				const names = Object.fromEntries(graph.nodes.map((n) => [n.id, { name: n.name }]));
+				const chainLines = chainsForSelection(
+					graph.nodes.map((n) => ({ id: n.id })),
+					graph.chains.map((c) => ({ id: c.id, premises: c.premises, conclusion: c.conclusion })),
+				)
+					.filter((c) => c.premises.length > 0)
+					.map((c) => readGraphChainLine(c, names));
+				const nodeLines = graph.nodes.map((n) => readGraphNodeNameLine(n));
+				const parts = [
+					`${graph.nodes.length} proposition(s) in the knowledge map:`,
+					...nodeLines,
+				];
+				if (chainLines.length > 0) {
+					parts.push("", `Reasoning chains (${chainLines.length}):`, ...chainLines);
+				}
+				return parts.join("\n");
+			}),
+		},
+	};
+}
+
 // ─── the auditor's graph tools (2026-09-27 relink) ───────────────────────────
 
 /**
@@ -87,8 +165,19 @@ export function proberGraphTools(ctx: GraphToolContext): Record<string, AgentToo
  * auditor looks up identity candidates itself). Auditor-specific
  * versions, deliberately different from the prober's:
  *
+ *   read_graph        ONE compact dump — every node's id + name +
+ *                     statement + aliases. THE happy-path ground: the
+ *                     graph is SMALL and FINITE, so one call grounds the
+ *                     whole identity pass. When it refuses (a graph above
+ *                     the dump cap), the auditor falls back to the per-
+ *                     session reads below (2026-10-30: before this tool
+ *                     existed, the auditor had to spend one turn PER
+ *                     session on list_propositions — a graph with more
+ *                     birth sessions than its turn budget could afford —
+ *                     and exhausted the budget without ever submitting,
+ *                     the "the auditor never submitted a review" failure).
  *   find              glob over node names + statements + aliases — the
- *                     identity workhorse; returns id + name + statement
+ *                     targeted sweep; returns id + name + statement
  *                     (statement text is ESSENTIAL for identity work,
  *                     unlike the prober's names-only rule).
  *   list_sessions     the birth-session index, no timestamps.
@@ -97,6 +186,13 @@ export function proberGraphTools(ctx: GraphToolContext): Record<string, AgentToo
  * No timestamps anywhere: identity work needs content, not chronology.
  * Read-only, pure core seams, same ports the snapshot reads.
  */
+
+/** The read_graph dump's cap (node count). Beyond it the compact listing
+ *  gets bigger than the per-session reads it replaces — honest refusal +
+ *  the fallback procedure (the tool names the fallback explicitly).
+ *  ~400 nodes × ~180 chars ≈ 5k tokens: a fraction of the write
+ *  channel's window, and far past what any real graph stays at. */
+export const AUDITOR_READ_GRAPH_MAX_NODES = 400;
 
 /** Glob match — `*` spans anything, case-insensitive. `*needle*` is the
  *  expected shape; a bare term gets implicit surrounding stars. */
@@ -118,6 +214,30 @@ export function auditorGraphTools(ctx: GraphToolContext): Record<string, AgentTo
 		}),
 	});
 	return {
+		read_graph: {
+			name: "read_graph",
+			label: "read_graph",
+			description:
+				"Read the ENTIRE knowledge graph in one call — every existing proposition: id, name, full statement, aliases. " +
+				"Call this FIRST: it is the whole ground of identity candidates; nothing to link exists outside it. " +
+				"If the graph is too large for one compact read, this tool says so — then fall back to list_sessions and read sessions with list_propositions.",
+			parameters: Type.Object({}),
+			execute: serverExecute("read_graph", Type.Object({}), async (): Promise<string> => {
+				const nodes = getGraph(deps.graphStore).nodes;
+				if (nodes.length === 0) return "The knowledge graph is empty — no proposition exists to link into.";
+				if (nodes.length > AUDITOR_READ_GRAPH_MAX_NODES) {
+					return (
+						`The graph is too large for one compact read (${nodes.length} nodes, cap ${AUDITOR_READ_GRAPH_MAX_NODES}). ` +
+						`Use list_sessions, then list_propositions per plausibly-related session, and find for targeted sweeps.`
+					);
+				}
+				const lines = nodes.map((n) => {
+					const aliases = n.aliases.length > 0 ? ` | aliases: ${n.aliases.join("; ")}` : "";
+					return `- ${n.id} :: ${n.name} :: ${n.statement}${aliases}`;
+				});
+				return `${nodes.length} proposition(s) in the graph — the complete ground:\n${lines.join("\n")}`;
+			}),
+		},
 		find: {
 			name: "find",
 			label: "find",

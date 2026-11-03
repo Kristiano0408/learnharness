@@ -193,6 +193,61 @@ describe("target validation — names normalize to ids, unknowns reject", () => 
 	});
 });
 
+// ─── read_graph: the practitioner's whole-map reader (2026-11-03) ──────────
+
+describe("read_graph — the map a pick-less practice agent can actually see", () => {
+	const node = (id: string, name: string, statement: string): never =>
+		({
+			id,
+			name,
+			statement,
+			aliases: [],
+			createdAt: "2026-11-03T00:00:00.000Z",
+			provenance: [{ chatId: "c1", messageId: "m1" }],
+		}) as never;
+	const chain = (id: string, premises: string[], conclusion: string): never =>
+		({ id, premises, conclusion, provenance: [], createdAt: "2026-11-03T00:00:00.000Z" }) as never;
+
+	function ctxWithGraph(nodes: never[], chains: never[]) {
+		const graphStore = {
+			readNodes: () => nodes,
+			readChains: () => chains,
+		} as never;
+		return { ...ctxOf([]), graph: { chatStore: null as never, graphStore } };
+	}
+
+	it("grounded read: every proposition id+name + the stored chains among them", async () => {
+		const tools = practiceTools(
+			ctxWithGraph(
+				[node("n_a", "Modus ponens", "If P implies Q and P holds, Q holds."), node("n_b", "Soundness", "Valid argument from true premises has a true conclusion.")],
+				[chain("arg_1", ["n_a"], "n_b")],
+			),
+		);
+		const out = (await tools.read_graph!.execute!("tc", {} as never)).details as string;
+		assert.match(out, /2 proposition\(s\) in the knowledge map:/);
+		assert.ok(out.includes("- n_a :: Modus ponens"), "ids ride the read — problem.target needs them");
+		assert.ok(out.includes("- n_b :: Soundness"));
+		// Stored chains ride too: premises → conclusion, by NAMES
+		// (formatChainLine shape). Singleton chains stay out of the section.
+		assert.match(out, /Reasoning chains \(1\):/);
+		assert.ok(out.includes("- Modus ponens → Soundness"));
+	});
+
+	it("empty map: honest in its own voice, never a throw", async () => {
+		const tools = practiceTools(ctxWithGraph([], []));
+		const out = (await tools.read_graph!.execute!("tc", {} as never)).details as string;
+		assert.equal(out, "The knowledge map for this workspace is empty — no proposition exists yet.");
+	});
+
+	it("over the compact cap: refuses honestly + names the fallback reads", async () => {
+		const many = Array.from({ length: 401 }, (_, i) => node(`n_${i}`, `Node ${i}`, `statement ${i}`));
+		const tools = practiceTools(ctxWithGraph(many as never[], []));
+		const out = (await tools.read_graph!.execute!("tc", {} as never)).details as string;
+		assert.match(out, /too large for one compact read \(401 propositions, cap 400\)/);
+		assert.match(out, /list_sessions.*list_propositions/s, "the refusal names the fallback procedure");
+	});
+});
+
 // ── the registry + the agent ────────────────────────────────────────────────
 
 describe("the practice agent", () => {
@@ -208,12 +263,13 @@ describe("the practice agent", () => {
 		const jobs = { chatId: "c1", jobStore: null as never, spawn: (() => {}) as never, searchAvailable: () => false };
 		const graph = { chatStore: null as never, graphStore: null as never };
 		const tools = practiceTools({ ...ctxOf([]), jobs, graph });
-		// Both jobs remain available keylessly; the prober's two map
-		// readers stay behind their existing settings gate. Practice does
-		// not apply the teacher/prober user tool-toggle filter.
+		// Both jobs remain available keylessly; the map readers (the per-session
+		// pair + read_graph — the whole-map view, session-wave fix 2026-11-03)
+		// stay behind their existing settings gate. Practice does not apply the
+		// teacher/prober user tool-toggle filter.
 		assert.deepEqual(
 			Object.keys(tools).sort(),
-			["conclude", "find", "grep", "list_propositions", "list_sessions", "ls", "pdf", "problem", "read", "research"],
+			["conclude", "find", "grep", "list_propositions", "list_sessions", "ls", "pdf", "problem", "read", "read_graph", "research"],
 		);
 		const withSearch = practiceTools({ ...ctxOf([]), jobs: { ...jobs, searchAvailable: () => true }, graph });
 		assert.ok(withSearch.research, "a live engine also keeps research");

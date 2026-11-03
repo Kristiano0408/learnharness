@@ -25,6 +25,10 @@ export default async function ChatPage({
 			chatId={chat.id}
 			title={chat.title}
 			kind={chat.kind ?? "teach"}
+			// The session's filing (workspace wave): the graph entry seam — a
+			// workspace session's own graph is what its cards' targets live in
+			// (absent = Unsorted, which has no graph — decision 9).
+			workspaceId={chat.workspaceId}
 			// Wave D: the record IS native agent history — the client view is
 				// derived app-side (core/view.ts projectView; GET serves the same
 				// native messages).

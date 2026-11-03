@@ -127,6 +127,13 @@ export const extraction = createExtractionPipeline({
 	// refuses BEFORE any batch runs (the typed throw), never mid-run.
 	providerKeyMissing: (provider, tier) =>
 		providerKeyPresent(provider) ? null : providerKeyMissingEnvelope(provider, [tier]),
+	// THE CHUNK BUDGET (extraction-UX redesign, wired 2026-10-30): the saved
+	// graph.extractionChunkTokens lands here too — read FRESH per run (one
+	// read per run: a mid-run settings edit must not re-partition a source
+	// whose batches were already computed). This is the sole seam the server
+	// had never wired: before this wiring the pipeline silently fell back to
+	// the factory 4096 while the trigger compared against the saved number.
+	getChunkTokens: () => effectiveSettings().graph.extractionChunkTokens,
 });
 
 

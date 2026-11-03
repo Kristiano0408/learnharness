@@ -64,6 +64,10 @@ function EndpointRow({
 	const [baseUrl, setBaseUrl] = useState(endpoint?.baseUrl ?? "");
 	const [requiresKey, setRequiresKey] = useState(endpoint?.requiresKey ?? false);
 	const [vision, setVision] = useState(endpoint?.vision ?? false);
+	// The answer ceiling (2026-10-30): empty = unset — the chain decides
+	// (the server's own report; with nothing reported, no cap: the server's
+	// default governs).
+	const [maxOutput, setMaxOutput] = useState(endpoint?.maxOutputTokens != null ? String(endpoint.maxOutputTokens) : "");
 	const [error, setError] = useState<string | null>(null);
 	const [busy, setBusy] = useState(false);
 
@@ -74,18 +78,24 @@ function EndpointRow({
 		setBaseUrl(endpoint?.baseUrl ?? "");
 		setRequiresKey(endpoint?.requiresKey ?? false);
 		setVision(endpoint?.vision ?? false);
-	}, [endpoint?.id, endpoint?.label, endpoint?.baseUrl, endpoint?.requiresKey, endpoint?.vision]);
+		setMaxOutput(endpoint?.maxOutputTokens != null ? String(endpoint.maxOutputTokens) : "");
+	}, [endpoint?.id, endpoint?.label, endpoint?.baseUrl, endpoint?.requiresKey, endpoint?.vision, endpoint?.maxOutputTokens]);
 
 	async function save() {
 		if (!baseUrl.trim() || busy) return;
 		setBusy(true);
 		setError(null);
+		// Mirror the server parser: empty clears the ceiling; a bad number
+		// rides unset (the server never sees it).
+		const maxTokens = maxOutput.trim() === "" ? undefined : Number(maxOutput);
 		const err = await onSave({
 			id: endpoint?.id ?? slugFrom(baseUrl),
 			label: label.trim(),
 			baseUrl: baseUrl.trim(),
 			requiresKey,
 			vision,
+			maxOutputTokens:
+				maxTokens !== undefined && Number.isInteger(maxTokens) && maxTokens >= 100 ? maxTokens : undefined,
 		});
 		if (err) setError(err);
 		setBusy(false);
@@ -137,6 +147,24 @@ function EndpointRow({
 							className="size-3.5 accent-current"
 						/>
 						Vision
+					</label>
+					<label className="flex shrink-0 items-center gap-1.5 font-ui text-xs text-muted-foreground">
+						<input
+							type="number"
+							min={100}
+							value={maxOutput}
+							onChange={(e) => setMaxOutput(e.target.value)}
+							onKeyDown={(e) => {
+								if (e.key === "Enter") void save();
+							}}
+							placeholder="default"
+							aria-label="Answer ceiling (tokens)"
+										title="Max tokens per answer. Empty = the server's own report or its own default. A local model that cuts its answer short: raise this."
+							data-testid={`${testid}-maxoutput`}
+							disabled={busy}
+							className="h-7 w-24 min-w-0 rounded-sm border border-border bg-background px-1.5 font-mono text-xs text-foreground outline-none placeholder:text-muted-foreground/60 focus:border-muted-foreground/50"
+						/>
+						answer max
 					</label>
 					<button
 						type="button"

@@ -542,19 +542,19 @@ has read a source (a teaching session, or the author's personal notes) and repor
 their reasoning chains. You NEVER see the source itself — the extractor is fully trusted, and you do not re-check
 its work. Your job is IDENTITY: connecting those findings to the CURRENT knowledge graph, preparing the merge.
 
-You explore the graph through your tools: list_sessions, list_propositions, and find (glob over names +
-statements + aliases; each hit also says which session it was born in). The graph is SMALL and FINITE — a handful of
-sessions — and your job is done as soon as you have SEEN the plausible candidates. FOLLOW THIS PROCEDURE:
+You explore the graph through your tools: read_graph, list_sessions, list_propositions, and find (glob over names +
+statements + aliases; each hit also says which session it was born in). The graph is SMALL and FINITE. FOLLOW THIS PROCEDURE:
 
-1. GROUND yourself first: call list_sessions ONCE. This one call shows the entire space — every session that ever
-   contributed propositions, and how many. Now you know the extent of what you are searching; nothing is hidden.
-2. READ the plausibly-related sessions: for each session whose topic could overlap these findings, call
-   list_propositions — every proposition born there, with full statement text. A few calls and you have read
-   every realistic identity candidate in the graph.
-3. find is your targeted sweep: use it for phrasings, synonyms, and neighboring ideas the session reads made you
-   wonder about — its hits point back at sessions you can read whole.
-4. SUBMIT. Once every plausibly-related session has been read (and stray finds come back empty), you are DONE.
-   Do not re-search ground you have already seen; more patterns over the same nodes are wasted work.
+1. GROUND yourself first: call read_graph ONCE. It shows every existing proposition — id, name, full statement,
+   aliases — the entire space you are searching. Nothing is hidden; you know the extent of what you link from.
+2. SUBMIT. With the whole ground seen, judge every proposition in one pass and submit immediately. read_graph
+   is the entire exploration: there is nothing else to look at. Do NOT re-read what you already saw; do not
+   sweep the ground with find over phrasings you have already seen — more patterns over the same nodes are
+   wasted work.
+   FALLBACK ONLY (large graphs): if read_graph says the graph is too large for one read, ground yourself with
+   list_sessions ONCE (the whole session space), call list_propositions for each session whose topic could overlap
+   these findings, use find for targeted sweeps over phrasings those reads made you wonder about, and once every
+   plausibly-related session has been read, SUBMIT.
 
 IDENTITY — links, per proposition:
 - For each proposition: does an EXISTING node — one you have now SEEN — already state this same proposition?

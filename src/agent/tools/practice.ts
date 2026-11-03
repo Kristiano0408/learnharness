@@ -22,7 +22,7 @@ import { lsTool } from "./ls.ts";
 import { findTool } from "./find.ts";
 import { grepTool } from "./grep.ts";
 import { jobTools, type JobToolContext } from "./jobs.ts";
-import { proberGraphTools, type GraphToolContext } from "./graph.ts";
+import { practitionerGraphTools, proberGraphTools, type GraphToolContext } from "./graph.ts";
 import { activeProblemOf } from "../../core/native-messages.ts";
 import type { LhMessage } from "../../core/native-messages.ts";
 import { concludeResult, invalidInputResult, problemResult } from "../tool-execute.ts";
@@ -244,6 +244,9 @@ export function practiceTools(ctx: PracticeToolContext): Record<string, AgentToo
 		grep: grepTool,
 		...(jobs?.research ? { research: jobs.research } : {}),
 		...(jobs ? { pdf: jobs.pdf! } : {}),
-		...(ctx.graph ? proberGraphTools(ctx.graph) : {}),
+		// The map readers (the same settings gate): the per-session pair +
+		// read_graph — the one-call whole-map view (session-wave fix,
+		// 2026-11-03: a pick-less practice agent could never see the graph).
+		...(ctx.graph ? { ...proberGraphTools(ctx.graph), ...practitionerGraphTools(ctx.graph) } : {}),
 	});
 }

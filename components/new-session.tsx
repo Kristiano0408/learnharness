@@ -13,6 +13,7 @@ import { StatsBar } from "@/components/stats-bar";
 import { ChainTableOverlay } from "@/components/chain-table.tsx";
 import { ComposerActions, NodePickerControl, WorkspaceChip } from "@/components/composer-actions";
 import { OPENING_PROMPT_FAILURE } from "@/components/opening-prompt";
+import { graphScopedUrl } from "@/components/graph-view.tsx";
 import { SessionStarter } from "@/components/start-session";
 import { DRAFT_WORKSPACE_KEY, UNSORTED_KEY, type ChatSettings, type GraphSnapshot, type WorkspaceListItem } from "@/src/core";
 
@@ -279,10 +280,11 @@ export function NewSession({ initialConfigured, mode = "teach" }: { initialConfi
 	 *   chip needs it; a failed fetch leaves the draft usable, Unsorted
 	 *   only). */
 	const [workspaces, setWorkspaces] = useState<WorkspaceListItem[]>([]);
-	const [filing, setFiling] = useState<string>(UNSORTED_KEY);
+	// The read starts on the persisted filing choice — a synchronous pass
+	// inside the lazy-fetch effect below (the picker's snapshot derives from
+	// it; a workspace draft must ground its picks in THAT workspace's graph).
+	const [filing, setFiling] = useState<string>(() => window.localStorage.getItem(DRAFT_WORKSPACE_KEY) ?? UNSORTED_KEY);
 	useEffect(() => {
-		const stored = window.localStorage.getItem(DRAFT_WORKSPACE_KEY);
-		if (stored) setFiling(stored);
 		void fetch("/api/workspaces")
 			.then((r) => r.json() as Promise<{ workspaces: WorkspaceListItem[] }>)
 			.then((d) => setWorkspaces(d.workspaces))
@@ -292,17 +294,21 @@ export function NewSession({ initialConfigured, mode = "teach" }: { initialConfi
 	}, []);
 	const applyFiling = useCallback((key: string) => {
 		setFiling(key);
+		// The draft's graph FOLLOWS its filing (session-wave fix, 2026-11-03):
+		// a stale pick set from the previous workspace must never ride a send
+		// into the new one.
+		setSnapshot(null);
+		applyPicks([]);
 		if (key === UNSORTED_KEY) window.localStorage.removeItem(DRAFT_WORKSPACE_KEY);
 		else window.localStorage.setItem(DRAFT_WORKSPACE_KEY, key);
-	}, []);
+	}, [applyPicks]);
 	const openPicker = () => {
-		if (snapshot) {
-			setPickerOpen(true);
-			return;
-		}
-		void fetch("/api/graph")
+		void fetch(graphScopedUrl("/api/graph", filing === UNSORTED_KEY ? null : filing))
 			.then((r) => r.json() as Promise<GraphSnapshot>)
 			.then((snap) => {
+				// Re-fetch on every open: the snapshot must reflect the CURRENT
+				// filing choice (session-wave fix, 2026-11-03 — a draft filed in
+				// a workspace used to pick from the legacy global graph).
 				setSnapshot(snap);
 				setPickerOpen(true);
 			})

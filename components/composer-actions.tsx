@@ -1,9 +1,11 @@
 "use client";
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { DumbbellIcon, FolderIcon } from "lucide-react";
+import Link from "next/link";
+import { DumbbellIcon, FolderIcon, WaypointsIcon } from "lucide-react";
 import { MenuShell } from "@/components/menu-shell";
 import { UNSORTED_KEY } from "@/src/core";
+import { workspaceGraphUrl } from "@/components/graph-view";
 import type { WorkspaceListItem } from "@/src/core";
 
 /** Home and the draft share one wrapping action row. Picker controls lead;
@@ -104,7 +106,7 @@ export function WorkspaceChip({
 		};
 	}, [open]);
 	return (
-		<div className="relative">
+		<div className="relative flex items-center gap-1.5">
 			<button
 				ref={anchorRef}
 				type="button"
@@ -122,6 +124,22 @@ export function WorkspaceChip({
 				<FolderIcon aria-hidden="true" className="size-3.5 text-muted-foreground" />
 				{value === UNSORTED_KEY ? "Workspace: Unsorted" : name}
 			</button>
+			{/* THE CHIP'S GRAPH ENTRY (session-wave fix, 2026-11-03): a filed
+			    draft's graph destination is this workspace's scoped home graph —
+			    the same ledgers its picks and its created session's targets live
+			    in. Unsorted rides nothing: no workspaceId, no graph (decision 9). */}
+			{workspaceGraphUrl(value === UNSORTED_KEY ? undefined : value) !== null && (
+				<Link
+					href={workspaceGraphUrl(value === UNSORTED_KEY ? undefined : value)!}
+					data-testid="workspace-chip-graph"
+					title="Open this workspace's graph"
+					aria-label={`Open the ${name} graph`}
+					className="flex cursor-pointer items-center gap-1.5 rounded-full border border-border/80 bg-card px-3 py-1.5 font-ui text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+				>
+					<WaypointsIcon aria-hidden="true" className="size-3.5 text-primary" />
+					Graph
+				</Link>
+			)}
 			{open && (
 				<MenuShell
 					anchorRef={anchorRef}

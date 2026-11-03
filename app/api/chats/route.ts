@@ -1,6 +1,6 @@
 import { chainsForSelection, formatChainLine } from "@/src/core";
 import { newGraphContextMessage, type GraphContextPick } from "@/src/core";
-import { compactionInFlight, createChat, isTurnRunning, listChats, readSettingsRecord, stores, titleFromPrompt, workspaceExists } from "@/src/server";
+import { compactionInFlight, createChat, graphStoreForChatRead, isTurnRunning, listChats, readSettingsRecord, stores, titleFromPrompt, workspaceExists } from "@/src/server";
 import type { ChatListItem } from "@/src/core";
 
 /** The session picker's list: record-derived summaries (phase, pending
@@ -67,9 +67,16 @@ export async function POST(req: Request) {
 					.slice(0, 64)
 			: [];
 	if (picks.length > 0) {
-		const byId = new Map(stores.graphStore.readNodes().map((n) => [n.id, n]));
+		// THE SCOPED READ (session-wave fix, 2026-11-03): the chains among the
+		// picks derive from the graph that SESSION files into — a workspace
+		// session's ledger lives in its own store (docs/workspaces.md decision
+		// 8); reading the legacy global store here derived chains for an
+		// Unsorted world and left every workspace pick chain-less. A vanished
+		// chat falls back to the legacy read — honest, never a throw.
+		const graph = graphStoreForChatRead(chat.id) ?? stores.graphStore;
+		const byId = new Map(graph.readNodes().map((n) => [n.id, n]));
 		const pickedNodes = picks.map((p) => byId.get(p.id)).filter((n) => n !== undefined);
-		const chainLines = chainsForSelection(pickedNodes, stores.graphStore.readChains()).map((c) =>
+		const chainLines = chainsForSelection(pickedNodes, graph.readChains()).map((c) =>
 			formatChainLine(c, Object.fromEntries(byId)),
 		);
 		stores.chatStore.saveMessages(chat.id, [newGraphContextMessage(picks, chainLines)]);

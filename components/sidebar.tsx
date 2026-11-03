@@ -18,6 +18,7 @@ import {
 	SearchIcon,
 	SettingsIcon,
 	Trash2Icon,
+	WaypointsIcon,
 } from "lucide-react";
 import { ActivitySection } from "@/components/activity-dock";
 import { CoverageMenuBlock } from "@/components/extraction-coverage";
@@ -405,6 +406,7 @@ import {
 	type SessionKindFilter,
 	type WorkspaceListItem,
 } from "@/src/core";
+import { workspaceGraphUrl } from "@/components/graph-view";
 const KIND_FILTER_KEY = "lh:session-kind-filter";
 /** Collapsed workspace sections (id → true). Unsorted is never collapsed
  *  (it is the fallback home, not a workspace the learner curated). */
@@ -479,6 +481,25 @@ export function WorkspaceSectionHeader({
 			{busyCount > 0 && <BrailleSpinner />}
 			{section.chats.length > 0 && (
 				<span className="shrink-0 text-[11px] tabular-nums text-muted-foreground/70">{section.chats.length}</span>
+			)}
+			{/* THE WORKSPACE GRAPH ENTRY (session-wave fix, 2026-11-03): every
+			    workspace section links its own scoped home graph
+			    (`?workspace=<id>` — the GraphView mount seam). A filed session's
+			    practice targets and picked propositions live in exactly this ledger
+			    family; before this, the only way INTO a workspace graph was the
+			    graph view's scope selector. Unsorted is deliberately excluded: no
+			    workspaceId, no graph (decision 9). Always visible — the graph is a
+			    destination, not a hover action. */}
+			{section.workspaceId !== null && (
+				<Link
+					href={workspaceGraphUrl(section.workspaceId)!}
+					data-testid={`workspace-graph-${section.key}`}
+					aria-label={`Open the ${section.name} graph`}
+					title="Open workspace graph"
+					className="flex size-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+				>
+					<WaypointsIcon className="size-3" />
+				</Link>
 			)}
 			{!isUnsorted && (
 				<span className="flex shrink-0 items-center opacity-0 transition-opacity group-hover/section:opacity-100">
@@ -1364,6 +1385,24 @@ function SessionsSidebar() {
 						>
 							Move to workspace…
 						</button>
+						{/* Open this session's graph (session-wave fix, 2026-11-03): the
+						    fetched ctx row carries its filing; a filed session's graph IS
+						    its workspace's ledger family. Unsorted rides nothing honest —
+						    no workspaceId, no graph (decision 9). */}
+						{(() => {
+							const ctxChat = chats?.find((c) => c.id === ctxChatId);
+							const graphUrl = workspaceGraphUrl(ctxChat?.workspaceId);
+							return graphUrl === null ? null : (
+								<a
+									href={graphUrl}
+									data-testid="ctx-open-graph"
+									onClick={() => setCtxChatId(null)}
+									className="flex items-center rounded-lg px-2.5 py-1.5 text-left text-foreground transition-colors hover:bg-accent"
+								>
+									Open workspace graph
+								</a>
+							);
+						})()}
 						<button
 							type="button"
 							data-testid="ctx-delete"

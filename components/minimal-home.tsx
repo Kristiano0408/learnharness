@@ -19,9 +19,11 @@
  * lifts the pick set; the chip opens the overlay in select mode).
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ListTreeIcon, UploadIcon } from "lucide-react";
+import Link from "next/link";
+import { useSearchParams } from "next/navigation";
+import { ListTreeIcon, UploadIcon, WaypointsIcon } from "lucide-react";
 import { ChainTableOverlay } from "@/components/chain-table.tsx";
-import { GraphCostControl } from "@/components/graph-view.tsx";
+import { GraphCostControl, workspaceGraphUrl } from "@/components/graph-view.tsx";
 import { NotesImportErrors, useNotesImport } from "@/components/notes-import.tsx";
 import { Hint } from "@/components/ui/hint";
 import type { ChatSummary, GraphCostSummary, GraphSnapshot } from "@/src/core";
@@ -97,14 +99,26 @@ export function MinimalHome({
 	const [costs, setCosts] = useState<GraphCostSummary | null>(null);
 	const [chats, setChats] = useState<ChatSummary[]>([]);
 	const [chainsOpen, setChainsOpen] = useState(false);
-	const fileInputRef = useRef<HTMLInputElement>(null);
+	const fileInputRef = useRef<HTMLInputElement | null>(null);
+	/* THE GRAPH SCOPE (session-wave fix mirror of GraphView's seam,
+	   2026-11-03): a `?workspace=<id>` home link — from a filed session's graph
+	   entry or its draft chip — selects which workspace this view reads and
+	   imports into. Same honest guard GraphView uses (readGraphWorkspaceScope →
+	   the scoped URL contract), same legacy default when absent. */
+	const searchParams = useSearchParams();
+	const scopedWorkspaceId = (() => {
+		const raw = searchParams?.get("workspace") ?? null;
+		return raw && raw !== "global" && /^[A-Za-z0-9_-]+$/.test(raw) ? raw : null;
+	})();
 
 	const readState = useCallback(() => {
-		fetch("/api/graph")
+		const scoped = scopedWorkspaceId === null ? "/api/graph" : `/api/graph?workspace=${encodeURIComponent(scopedWorkspaceId)}`;
+		fetch(scoped)
 			.then((res) => res.json() as Promise<GraphSnapshot>)
 			.then(setSnapshot)
 			.catch(() => {});
-		fetch("/api/graph/costs")
+		const scopedCosts = scopedWorkspaceId === null ? "/api/graph/costs" : `/api/graph/costs?workspace=${encodeURIComponent(scopedWorkspaceId)}`;
+		fetch(scopedCosts)
 			.then((res) => res.json() as Promise<GraphCostSummary>)
 			.then(setCosts)
 			.catch(() => {});
@@ -112,7 +126,7 @@ export function MinimalHome({
 			.then((res) => res.json() as Promise<{ chats: ChatSummary[] }>)
 			.then((body) => setChats(body.chats))
 			.catch(() => {});
-	}, []);
+	}, [scopedWorkspaceId]);
 	useEffect(() => {
 		readState();
 	}, [readState]);
@@ -126,6 +140,10 @@ export function MinimalHome({
 	// Refetch even after incomplete imports: earlier writes and spend remain.
 	const notesImport = useNotesImport({ onFinish: readState });
 	const { importing, onImportFiles } = notesImport;
+	// THE WORKSPACE DESTINATION (mirrors GraphView's selector seam): every
+	// import lands in the graph this view reads — scoped workspace id when a
+	// `?workspace=` link arrived, otherwise the legacy Global destination.
+	notesImport.setWorkspace(scopedWorkspaceId ?? undefined);
 
 	const teachSessions = chats.filter((c) => c.kind === "teach").length;
 	const practiceSessions = chats.filter((c) => c.kind === "practice").length;
@@ -166,6 +184,23 @@ export function MinimalHome({
 			    entry law). */}
 			<div className="lh-no-drag lh-wco-floating absolute right-2 top-2 z-10 flex max-w-[calc(100%-5.5rem)] flex-col items-end gap-2">
 				<div className="flex min-w-0 items-start gap-2">
+					{/* THE GRAPH SCOPE (session-wave fix, 2026-11-03): the same
+					    selector the canvas view carries — Global (legacy) first, every
+					    workspace. MinimalHome reads/imports into the selected graph, so
+					    a filed session's graph entry (`?workspace=<id>`) lands here too
+					    when GRAPH RENDERING is off. */}
+					<div className="shrink-0 rounded-xl border bg-card/85 px-1 py-[3px] shadow-lg backdrop-blur">
+						<Hint label="Which graph to show" side="bottom">
+							<Link
+								href={workspaceGraphUrl(scopedWorkspaceId) ?? "/"}
+								data-testid="minimal-home-graph-link"
+								className="flex h-7 items-center gap-1.5 rounded-lg px-2.5 text-xs text-muted-foreground transition-colors hover:bg-accent"
+							>
+								<WaypointsIcon className="size-3" />
+								{scopedWorkspaceId === null ? "Graph" : "Open graph"}
+							</Link>
+						</Hint>
+					</div>
 					<div className="graph-chrome-fade-in shrink-0 rounded-xl border bg-card/85 px-1 py-[3px] shadow-lg backdrop-blur">
 						<Hint label="Every reasoning chain" side="bottom">
 							<button

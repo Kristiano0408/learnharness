@@ -140,6 +140,69 @@ describe("POST /api/chats — graphContext becomes message[0]", () => {
 		assert.ok(m.content.includes("- Modus ponens → Soundness"));
 	});
 
+	it("a WORKSPACE session derives its chains from ITS workspace graph (decision 8)", async () => {
+		// The pick was made in the workspace's graph view — the propositions and
+		// the chain live in data/workspaces/<id>/graph/, NOT the legacy store.
+		const node = (id: string, name: string, statement: string) => ({
+			id, name, statement, aliases: [] as string[], createdAt: "2026-10-01T00:00:00.000Z", provenance: [],
+		});
+		const { workspaceStore } = await import("../src/store/workspaces.ts");
+		const { graphStoresForChat } = await import("../src/server/stores.ts");
+		const ws = workspaceStore.createWorkspace("Logic drills");
+		const wsGraph = graphStoresForChat.forWorkspace(ws.id);
+		wsGraph.appendNode(node("n_w", "Tautology", "A formula true under every valuation."));
+		wsGraph.appendNode(node("n_v", "Validity", "An argument preserving truth from premises to conclusion."));
+		wsGraph.appendChain({
+			id: "arg_w", premises: ["n_w"], conclusion: "n_v",
+			provenance: [], createdAt: "2026-10-01T00:00:00.000Z",
+		});
+
+		const res = await POST(new Request("http://test/api/chats", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				title: "drill tautologies",
+				kind: "practice",
+				workspaceId: ws.id,
+				graphContext: { propositions: [{ id: "n_w", name: "Tautology", statement: "A formula true under every valuation." }] },
+			}),
+		}));
+		assert.equal(res.status, 200);
+		const { id } = (await res.json()) as { id: string };
+		try {
+			const record = chatStore.getChat(id)!;
+			const m = record.messages[0] as { content: string };
+			// The chain among the picks resolves through the WORKSPACE store.
+			assert.ok(m.content.includes("- [n_w] Tautology"), "the pick rides the marker");
+			// A workspace pick with no picked conclusion yields no chain line —
+			// honest (chains ride when BOTH members are picked). Assert against
+			// a two-pick variant:
+			const res2 = await POST(new Request("http://test/api/chats", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					title: "drill validity",
+					kind: "practice",
+					workspaceId: ws.id,
+					graphContext: { propositions: [
+						{ id: "n_w", name: "Tautology", statement: "A formula true under every valuation." },
+						{ id: "n_v", name: "Validity", statement: "An argument preserving truth from premises to conclusion." },
+					] },
+				}),
+			}));
+			const { id: id2 } = (await res2.json()) as { id: string };
+			const m2 = chatStore.getChat(id2)!.messages[0] as { content: string };
+			assert.ok(
+				m2.content.includes("- Tautology → Validity"),
+				"workspace chains derive from the workspace store (never the legacy global graph)",
+			);
+			fs.unlinkSync(path.join(process.env.LH_DATA_DIR!, "chats", `${id2}.json`));
+		} finally {
+			workspaceStore.deleteWorkspace(ws.id);
+			fs.unlinkSync(path.join(process.env.LH_DATA_DIR!, "chats", `${id}.json`));
+		}
+	});
+
 	it("no picks (or malformed) → no marker, an empty record as before", async () => {
 		for (const body of [{ title: "t" }, { title: "t", graphContext: { propositions: "junk" } }]) {
 			const res = await POST(new Request("http://test/api/chats", {

@@ -64,6 +64,7 @@
  */
 
 import { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { NotesImportErrors, useNotesImport } from "@/components/notes-import.tsx";
 import Link from "next/link";
 import { FileTextIcon, ListTreeIcon, Loader2Icon, SearchIcon, SettingsIcon, UploadIcon, WaypointsIcon } from "lucide-react";
@@ -164,6 +165,16 @@ export function graphScopedUrl(path: string, workspaceId: string | null): string
  *  Exported pure for render pins. */
 export function cameraStorageKey(workspaceId: string | null | undefined): string {
 	return workspaceId ? `${CAMERA_STORAGE_KEY}:${workspaceId}` : CAMERA_STORAGE_KEY;
+}
+
+/** THE scoped home URL (the "open this graph" seam, session-wave fix
+ *  2026-11-03): the route a session's/graph entry points at — "/" plus the
+ *  `?workspace=<id>` spelling the graph view's mount effect reads into the
+ *  selector (readGraphWorkspaceScope). null/Unsorted is null: no workspace,
+ *  no scoped destination (the caller renders nothing — decision 9 has no
+ *  graph there). Exported pure for pins. */
+export function workspaceGraphUrl(workspaceId: string | null | undefined): string | null {
+	return workspaceId ? `/?workspace=${encodeURIComponent(workspaceId)}` : null;
 }
 
 /* ── THE GRAPH-WVIEW WORKSPACE SELECTOR (Phase 6, decision C1 + owner
@@ -1119,6 +1130,10 @@ export function GraphView({
 	const containerRef = useRef<HTMLDivElement | null>(null);
 	const canvasRef = useRef<HTMLCanvasElement | null>(null);
 	const cardRef = useRef<HTMLDivElement | null>(null);
+	// The home URL's query (the scoped graph link seam — see the mount effect
+	// below). useSearchParams never returns undefined in this Next version;
+	// the optional chain is the honest read.
+	const searchParams = useSearchParams();
 	const [snapshot, setSnapshot] = useState<GraphSnapshot | null>(null);
 	const [selected, setSelected] = useState<Selection | null>(null);
 	// The latest snapshot for the renderer's click callbacks (they are
@@ -1184,7 +1199,24 @@ export function GraphView({
 			/* Storage full/blocked: the scope choice is view state — best-effort. */
 		}
 	}, []);
+	// The scoped home link (session-wave fix, 2026-11-03): a `?workspace=<id>`
+	// on the home URL — from a workspace session's graph entry or its draft's
+	// chip — WINS over the persisted scope on mount and lands the selector on
+	// that graph (the same honest guard; an unknown-but-valid id rides the
+	// empty read, and the vanished-workspace effect below falls it back to
+	// Global). The URL is a one-shot arrival: the value persists from here,
+	// so later in-app scope changes keep working normally.
 	useEffect(() => {
+		const scoped = readGraphWorkspaceScope(searchParams?.get("workspace") ?? null);
+		if (scoped !== null) {
+			setGraphWorkspaceId(scoped);
+			try {
+				localStorage.setItem(GRAPH_WORKSPACE_STORAGE_KEY, scoped);
+			} catch {
+				/* best-effort — the view state still holds this mount */
+			}
+			return;
+		}
 		const stored = (() => {
 			try {
 				return localStorage.getItem(GRAPH_WORKSPACE_STORAGE_KEY);
@@ -1194,7 +1226,7 @@ export function GraphView({
 		})();
 		const restored = readGraphWorkspaceScope(stored);
 		if (restored !== null) setGraphWorkspaceId(restored);
-	}, []);
+	}, [searchParams]);
 	// ⌘F (shortcut wave C): the find event focuses the node search —
 	// surface-scoped, dispatched as lh:kbd-find (only this page listens).
 	const searchInputRef = useRef<HTMLInputElement>(null);

@@ -61,6 +61,8 @@ import { TopBar } from "@/components/top-bar";
 import type { ArtifactPartProps, JobRecord, Phase3, QuestionAnswerData, QuestionFormDraft, TurnUsage, SessionPricing } from "@/src/core";
 import type { LhViewMessage } from "@/src/core";
 import { PhaseChip, PhaseDivider } from "@/components/phase-divider";
+import Link from "next/link";
+import { workspaceGraphUrl } from "@/components/graph-view";
 import {
 	CompactionCutDivider,
 	CompactionMomentDivider,
@@ -217,6 +219,7 @@ export function Chat({
 	initiallyCompacting = false,
 	initialConfigured = false,
 	kind = "teach",
+	workspaceId,
 }: {
 	chatId: string;
 	title: string;
@@ -240,6 +243,12 @@ export function Chat({
 	 *  it (BYOK, owner 2026-09-22). The server gate stays the truth; this
 	 *  only decides whether the pill rides the composer. */
 	initialConfigured?: boolean;
+	/** The session's workspace (workspace wave): absent = Unsorted, which has
+	 *  no graph (decision 9). A workspace session's graph entry — the header
+	 *  chip below — points at THAT workspace's scoped home graph, the same
+	 *  ledgers its practice targets and its picked propositions live in
+	 *  (session-wave fix, 2026-11-03). */
+	workspaceId?: string;
 }) {
 	// Reattach plumbing (background-turn runner wave): the hook holds the
 	// settled terminal's callback — a stable ref assigned below, once
@@ -1341,6 +1350,25 @@ export function Chat({
 							    drag surface (no carve-out) — the freed bar is grippable. */}
 							<div className="min-w-4 flex-1" aria-hidden="true" />
 					</>
+					)}
+					{/* THE GRAPH ENTRY (session-wave fix, 2026-11-03): a filed
+					    session's own graph — the workspace ledgers its practice
+					    targets and picked propositions live in — was reachable
+					    only from the graph view's scope selector. The chip deep-links
+					    the scoped home graph (?workspace=<id>, the GraphView mount
+					    seam). Unsorted (no workspaceId) has no graph: decision 9,
+					    render nothing honest rather than a link to an empty Global. */}
+					{workspaceGraphUrl(workspaceId) !== null && (
+						<Hint label="Open this session's graph" side="bottom">
+							<Link
+								href={workspaceGraphUrl(workspaceId)!}
+								data-testid="session-graph-chip"
+								className="lh-no-drag flex shrink-0 cursor-pointer items-center gap-1.5 rounded-full border border-border/80 px-2 py-0.5 text-xs font-medium uppercase tracking-wide text-muted-foreground transition-colors hover:border-border hover:text-foreground"
+							>
+								<WaypointsIcon className="size-3.5 text-primary" aria-hidden />
+								Graph
+							</Link>
+						</Hint>
 					)}
 					{/* The plan chip (owner, plan-placement round): session-level
 					    structure beside the phase chip — access to the full-DAG popup

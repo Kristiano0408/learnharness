@@ -25,7 +25,7 @@ import type {
 	RoleModelOverride,
 	CustomEndpointsSettings,
 } from "../core/settings.ts";
-import { BACKGROUND_MODEL_ROLES, COMPACTION_THRESHOLD_FLOOR, EXTRACTION_CHUNK_TOKENS_FLOOR, MODEL_SLOTS, isValidCustomEndpointId, sanitizeCustomBaseUrl } from "../core/settings.ts";
+import { BACKGROUND_MODEL_ROLES, COMPACTION_THRESHOLD_FLOOR, CUSTOM_ENDPOINT_MAX_TOKENS_FLOOR, EXTRACTION_CHUNK_TOKENS_FLOOR, MODEL_SLOTS, isValidCustomEndpointId, sanitizeCustomBaseUrl } from "../core/settings.ts";
 import { WRITABLE_TOOL_KEYS } from "../core/pending.ts";
 import { isDictationLanguage } from "../core/dictation.ts";
 
@@ -434,6 +434,23 @@ export function parseCustomEndpointsSettingsBody(body: unknown): SettingsBodyRes
 					return { ok: false, error: `endpoint "${key}" vision must be a boolean` };
 				}
 				endpoint.vision = entry.vision;
+			}
+			// maxOutputTokens (2026-10-30): the endpoint's answer ceiling —
+			// strict write side (reject-with-rationale, the chunk-budget
+			// precedent). The floor's rationale: a one-answer cap under ~100
+			// tokens cannot carry a submit agent's tool call — every
+			// extraction/job deliverable.
+			if (entry.maxOutputTokens !== undefined) {
+				if (typeof entry.maxOutputTokens !== "number" || !Number.isFinite(entry.maxOutputTokens) || !Number.isInteger(entry.maxOutputTokens)) {
+					return { ok: false, error: `endpoint "${key}" maxOutputTokens must be an integer` };
+				}
+				if (entry.maxOutputTokens < CUSTOM_ENDPOINT_MAX_TOKENS_FLOOR) {
+					return {
+						ok: false,
+						error: `endpoint "${key}" maxOutputTokens must be at least ${CUSTOM_ENDPOINT_MAX_TOKENS_FLOOR} (smaller answers cannot carry a tool call)`,
+					};
+				}
+				endpoint.maxOutputTokens = entry.maxOutputTokens;
 			}
 			parsed[key] = endpoint;
 		}

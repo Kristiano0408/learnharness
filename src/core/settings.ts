@@ -80,6 +80,18 @@ export interface CustomEndpoint {
 	 *  federate into the VISION slot's picker (the vision tier filters to
 	 *  models with image input). Default false. */
 	vision?: boolean;
+	/** The user's ceiling for ONE answer (this endpoint's output tokens).
+	 *  Set it when the server's own default misbehaves or the catalog reports
+	 *  nothing: llama.cpp/Ollama report no `max_tokens` in /v1/models, and pi
+	 *  sends no cap at all when the request carries none — so a weak local
+	 *  model can silently truncate its submit payload mid-emission. The
+	 *  discovery honors it: endpoint value > the entry's max_tokens > unset
+	 *  (no ceiling: the server's own default governs, unchanged behavior).
+	 *  No hard ceiling here: a bigger room is the user's call (the graph
+	 *  chunk-budget's no-ceiling discipline). A configured value floors at
+	 *  CUSTOM_ENDPOINT_MAX_TOKENS_FLOOR — smaller answers cannot carry a tool
+	 *  call. */
+	maxOutputTokens?: number;
 }
 
 /** The settings.json section: the user's custom endpoints, keyed by id. */
@@ -529,6 +541,13 @@ function sanitizeHexOrNull(value: unknown): string | null {
 const boolOrDrop = (value: unknown): boolean | undefined =>
 	typeof value === "boolean" ? value : undefined;
 
+/** The floor for a custom endpoint's output ceiling
+ *  (CustomEndpoint.maxOutputTokens): a ONE-answer cap below ~100 tokens
+ *  can never carry a submit agent's deliverable (the tool call itself),
+ *  so the sanitizer drops a smaller number and the PUT names this in its
+ *  rejection. NO ceiling: a bigger room is the user's call. */
+export const CUSTOM_ENDPOINT_MAX_TOKENS_FLOOR = 100;
+
 function sanitizeGeneral(raw: Record<string, unknown>): GeneralSettings {
 	// No known fields remain: the retired `autoUpdate` (and any future
 	// general key) rides the verbatim unknown-key passthrough in
@@ -594,6 +613,13 @@ function sanitizeCustomEndpoint(raw: unknown): CustomEndpoint | undefined {
 	if (typeof r.label === "string" && r.label.trim()) out.label = r.label.trim();
 	if (typeof r.requiresKey === "boolean") out.requiresKey = r.requiresKey;
 	if (typeof r.vision === "boolean") out.vision = r.vision;
+	// maxOutputTokens: clamp-never-reject (the chunk-budget discipline) —
+	// a finite integer at or above the floor keeps it, anything else drops
+	// (the discovery chain then decides: endpoint > entry > floor).
+	const rawMax = r.maxOutputTokens;
+	if (typeof rawMax === "number" && Number.isFinite(rawMax) && Number.isInteger(rawMax) && rawMax >= CUSTOM_ENDPOINT_MAX_TOKENS_FLOOR) {
+		out.maxOutputTokens = rawMax;
+	}
 	return out;
 }
 

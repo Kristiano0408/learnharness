@@ -95,24 +95,31 @@ export function isCustomSpec(spec: { provider: string }): boolean {
 }
 
 /** The catalog shape a `/v1/models` entry carries (only the fields worth
- *  reading; unknown fields ride past it). */
+ *  reading; unknown fields ride past it). llama.cpp-shape servers (strata,
+ *  llama.cpp, Ollama) report their window in `meta.n_ctx` instead of the
+ *  OpenAI-standard `context_length` — both shapes read. */
 interface DiscoveredModel {
 	id?: unknown;
 	name?: unknown;
 	context_length?: unknown;
 	max_tokens?: unknown;
+	meta?: { n_ctx?: unknown };
 	description?: unknown;
 }
 
-/** The conservative catalog floor for a discovered model whose server told
- *  us nothing: 128k context + a 4k answer room. Conservative on purpose —
- *  compaction's min(threshold, window − 16k reserve) keeps the chat honest
- *  even when llama.cpp/Ollama reports no window at all. */
+/** The conservative catalog floor for a discovered model when the server
+ *  told us nothing anywhere: a 128k context window. Conservative on purpose
+ *  — compaction's min(threshold, window − 16k reserve) keeps the chat honest
+ *  even when llama.cpp/Ollama reports no window at all. There is NO answer
+ *  ceiling floor anymore (2026-10-30): a silent 4096 capped every custom
+ *  request invisibly — see toCustomModel's OUTPUT ROOM. */
 const CUSTOM_DEFAULT_CONTEXT_WINDOW = 128_000;
-const CUSTOM_DEFAULT_MAX_TOKENS = 4_096;
 
+/** A non-negative integer, else the fallback. 0 is a LEGAL result (the
+ *  custom ceiling chain's "no ceiling" marker: pi-ai skips the cap field
+ *  when options.maxTokens is falsy). */
 function positiveInt(value: unknown, fallback: number): number {
-	return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : fallback;
 }
 
 /** Map one discovered `/v1/models` entry to a pi-ai chat model. Reasoning
@@ -134,8 +141,30 @@ function toCustomModel(endpoint: CustomEndpoint, entry: DiscoveredModel): Model<
 		input: endpoint.vision ? ["text", "image"] : ["text"],
 		reasoning: false,
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: positiveInt(entry.context_length, CUSTOM_DEFAULT_CONTEXT_WINDOW),
-		maxTokens: positiveInt(entry.max_tokens, CUSTOM_DEFAULT_MAX_TOKENS),
+		// CONTEXT: the standard OpenAI field first, then llama.cpp's
+		// `meta.n_ctx` (what local servers actually report, e.g. strata's
+		// n_ctx: 262144), then the conservative floor.
+		contextWindow: positiveInt(entry.context_length ?? entry.meta?.n_ctx, CUSTOM_DEFAULT_CONTEXT_WINDOW),
+		// OUTPUT ROOM (2026-10-30): the user's endpoint ceiling > the entry's
+		// own max_tokens > unset. One number with three consumers: honored in
+		// the catalog, put on the wire by the engine builder's injected cap,
+		// read by pi-ai's thinking-budget room. The old silent 4096 floor is
+		// GONE — it capped every custom request invisibly (verified against a
+		// live llama.cpp server: the server honors max_tokens, so the floor was
+		// an app-side ceiling no one configured). maxTokens 0 = UNSET (pi-ai's
+		// falsy check skips the cap field entirely: a server that tells us
+		// nothing keeps answering with its own default — today's unchanged
+		// behavior). A discovered or configured ceiling is the only thing that
+		// puts a cap on the wire (the engine builder injects it).
+		maxTokens: positiveInt(endpoint.maxOutputTokens ?? entry.max_tokens, 0),
+		// A custom server is a `max_tokens` family: llama.cpp/Ollama/vLLM/LM
+		// Studio read `max_tokens` and SILENTLY IGNORE the modern
+		// `max_completion_tokens` (verified against a live server, 2026-10-30:
+		// the field rode a request pi-ai sent, and the server served its own
+		// default instead). pi-ai's URL detection cannot know a localhost, so
+		// without this compat the cap would ride a field the server throws
+		// away.
+		compat: { maxTokensField: "max_tokens" },
 	};
 }
 
@@ -235,7 +264,15 @@ function customState(): { signatures: Map<string, string>; fetches: Map<string, 
  *  display-only and deliberately excluded: renaming an endpoint must not
  *  destroy its catalog, and the settings-save path refreshes anyway. */
 function customEndpointSignature(endpoint: CustomEndpoint): string {
-	return JSON.stringify([endpoint.baseUrl, endpoint.requiresKey === true, endpoint.vision === true]);
+	// maxOutputTokens joins (2026-10-30): the ceiling is baked into the
+	// provider's discovered models, so changing it IS request-facing — the
+	// provider re-registers (and re-discovers) to carry it.
+	return JSON.stringify([
+		endpoint.baseUrl,
+		endpoint.requiresKey === true,
+		endpoint.vision === true,
+		endpoint.maxOutputTokens ?? null,
+	]);
 }
 
 /** Re-register one custom endpoint's provider into the process-wide
@@ -358,10 +395,26 @@ function assembleEngine(spec: ResolvedModelSpec, model: Model<Api>, background: 
 		// bound streamSimple: the agent loop forwards state.thinkingLevel as
 		// `reasoning` (undefined = off on pi-ai's scale); the clamp above keeps
 		// the pin honest even when config or settings drift off the map.
+		// THE CUSTOM CAP (2026-10-30): the agent loop never forwards a request
+		// maxTokens, and pi-ai omits the max-tokens field entirely when
+		// options lack one — a custom server then answers with ITS own
+		// default, invisible to the app, and a weak local model silently
+		// truncates a submit agent's tool call mid-emission. So the catalog's
+		// ceiling (the chain in toCustomModel) rides the request EXPLICITLY,
+		// through the compat-picked field. Built-in providers keep pi-ai's
+		// exact behavior: no injection there, no behavior change.
 		streamFn: (requestModel, context, options) => {
 			const purpose = typeof background === "function" ? background : () => background;
+			const levelOption = { reasoning: level === "off" ? undefined : level };
+			if (isCustomSpec(spec)) {
+				return models.streamSimple.bind(models)(requestModel, context, {
+					...options,
+					...levelOption,
+					maxTokens: model.maxTokens,
+				});
+			}
 			const stream = spec.provider === "chatgpt" ? chatGPTStream(purpose, lifecycle) : nativeId ? nativeSubscriptionStream(models.getProvider(nativeId)!, purpose, lifecycle) : models.streamSimple.bind(models);
-			return stream(requestModel, context, { ...options, reasoning: level === "off" ? undefined : level });
+			return stream(requestModel, context, { ...options, ...levelOption });
 		},
 	};
 }

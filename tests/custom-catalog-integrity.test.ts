@@ -32,7 +32,7 @@
 
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "node:test";
-import { createFauxCore, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { createFauxCore, fauxAssistantMessage, fauxToolCall, normalizeContext } from "@earendil-works/pi-ai";
 import {
 	piEngineForSpec,
 	piModels,
@@ -43,6 +43,8 @@ import {
 	type PiEngine,
 } from "../src/agent/models.ts";
 import { syncCustomProvidersFromRecord } from "../src/server/model-catalog.ts";
+import { auditorGraphTools } from "../src/agent/tools/graph.ts";
+import { readFileSync } from "node:fs";
 import { createExtractionPipeline } from "../src/agent/subagents/extraction.ts";
 import { ModelsNotConfiguredError } from "../src/core/settings.ts";
 import type { CustomEndpoint } from "../src/core/settings.ts";
@@ -60,14 +62,20 @@ let discovery: Discovery;
 /** Serve `models` on every fixture endpoint's discovery URL, counting every
  *  call. A request that is not a fixture /models call is a hard failure (the
  *  web-subscriptions discipline). */
-function stubEndpoint(models: { id: string }[]): void {
+function stubEndpoint(models: { id: string; max_tokens?: number; context_length?: number; meta?: { n_ctx: number } }[]): void {
 	discovery = { count: 0, urls: [] };
 	globalThis.fetch = async (input) => {
 		const url = String(input);
 		discovery.urls.push(url);
 		discovery.count++;
 		if (!/^https?:\/\/[^/]+\.invalid(:\d+)?\/v1\/models$/.test(url)) throw new Error(`unexpected network request: ${url}`);
-		return Response.json({ object: "list", data: models.map((m) => ({ id: m.id, object: "model" })) });
+		return Response.json({ object: "list", data: models.map((m) => {
+			const entry: Record<string, unknown> = { id: m.id, object: "model" };
+			if (m.max_tokens !== undefined) entry.max_tokens = m.max_tokens;
+			if (m.context_length !== undefined) entry.context_length = m.context_length;
+			if (m.meta !== undefined) entry.meta = m.meta;
+			return entry;
+		}) });
 	};
 }
 
@@ -388,5 +396,117 @@ describe("the engineFor seams accept async resolution", () => {
 			"the refusal stays typed and lands BEFORE any stage runs",
 		);
 		assert.equal(ledgers.readNodes().length, 0, "a refusal merged nothing");
+	});
+});
+
+// ─── 6. THE OUTPUT CEILING (custom endpoints, 2026-10-30) ──────────────────
+describe("the custom endpoint's answer ceiling", () => {
+	it("discovery honors meta.n_ctx (llama.cpp/strata shape) and the user's maxOutputTokens chain", async () => {
+		const { endpoint, provider } = fixture("ceiling-catalog");
+		globalThis.fetch = async (input) => {
+			if (!/\/v1\/models$/.test(String(input))) throw new Error(`unexpected network request: ${input}`);
+			return Response.json({ object: "list", data: [{ id: MODEL_ID, meta: { n_ctx: 262144 } }] });
+		};
+		syncCustomProvider(endpoint);
+		await resolveEngineForSpec({ provider: `custom:${endpoint.id}`, id: MODEL_ID, thinkingLevel: "off" });
+		const [model] = piModels().getModels(provider);
+		assert.ok(model, "the fixture model landed in the catalog");
+		assert.equal(model.contextWindow, 262144, "meta.n_ctx rides the catalog — a reported window never falls to the floor");
+		assert.equal(model.maxTokens, 0, "no endpoint ceiling, no server report: UNSET — pi-ai sends no cap (unchanged behavior)");
+
+		// The user's ceiling wins over everything the server reported.
+		syncCustomProvider({ ...endpoint, maxOutputTokens: 16384 }); // signature-changed → re-register
+		await resolveEngineForSpec({ provider: `custom:${endpoint.id}`, id: MODEL_ID, thinkingLevel: "off" });
+		const [kept] = piModels().getModels(provider);
+		assert.ok(kept, "the re-registered catalog carries the fixture model");
+		assert.equal(kept.maxTokens, 16384, "the endpoint's maxOutputTokens is the ceiling chain's top rung");
+	});
+
+	it("maxOutputTokens is request-facing: changing it re-registers (and re-discovers) the provider", async () => {
+		const { endpoint } = fixture("ceiling-signature");
+		stubEndpoint([{ id: MODEL_ID }]);
+		syncCustomProvider(endpoint);
+		await resolveEngineForSpec({ provider: `custom:${endpoint.id}`, id: MODEL_ID, thinkingLevel: "off" });
+		assert.equal(discovery.count, 1);
+		syncCustomProvider({ ...endpoint, maxOutputTokens: 8192 }); // a real request-facing change
+		await resolveEngineForSpec({ provider: `custom:${endpoint.id}`, id: MODEL_ID, thinkingLevel: "off" });
+		assert.equal(discovery.count, 2, "the ceiling change re-registered the provider — the fresh catalog carries it");
+	});
+
+	it("THE WIRE: a custom engine sends the cap through max_tokens (llama.cpp ignores max_completion_tokens)", async () => {
+		const { endpoint, provider } = fixture("ceiling-wire", { maxOutputTokens: 16384 });
+		stubEndpoint([{ id: MODEL_ID, meta: { n_ctx: 32768 }, context_length: 32768 }]);
+		syncCustomProvider(endpoint);
+		const engine = await resolveEngineForSpec({ provider, id: MODEL_ID, thinkingLevel: "off" });
+		assert.equal(engine.model.maxTokens, 16384, "the endpoint ceiling lands in the catalog");
+		let sentBody: Record<string, unknown> | undefined;
+		const captureFetch = (async (input, init) => {
+			sentBody = JSON.parse(String(init?.body));
+			return new Response("data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } });
+		}) as typeof fetch;
+		const result = engine.streamFn(
+			engine.model,
+			normalizeContext({ messages: [{ role: "user", content: "hi", timestamp: 1 }], tools: [] }),
+			{ apiKey: "fixture-key", fetch: captureFetch },
+		);
+		await result.result().catch(() => undefined); // the fake SSE ends the stream early — the body is the point
+		assert.ok(sentBody, "the request reached fetch");
+		assert.equal(sentBody.max_tokens, 16384, "the cap rides the field llama.cpp honors (verified live: max_completion_tokens is silently ignored)");
+		assert.equal("max_completion_tokens" in sentBody, false, "never the modern field a local server throws away");
+	});
+
+	it("THE WIRE: no user ceiling + no server report → NO cap on the wire (unchanged behavior)", async () => {
+		const { endpoint, provider } = fixture("ceiling-wire-absent");
+		stubEndpoint([{ id: MODEL_ID }]); // reports nothing: neither max_tokens nor window
+		syncCustomProvider(endpoint);
+		const engine = await resolveEngineForSpec({ provider: `custom:${endpoint.id}`, id: MODEL_ID, thinkingLevel: "off" });
+		let sentBody: Record<string, unknown> | undefined;
+		const captureFetch = (async (input, init) => {
+			sentBody = JSON.parse(String(init?.body));
+			return new Response("data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } });
+		}) as typeof fetch;
+		const result = engine.streamFn(
+			engine.model,
+			normalizeContext({ messages: [{ role: "user", content: "hi", timestamp: 1 }], tools: [] }),
+			{ apiKey: "fixture-key", fetch: captureFetch },
+		);
+		await result.result().catch(() => undefined);
+		assert.ok(sentBody);
+		assert.equal("max_tokens" in sentBody, false, "no ceiling anywhere: pi-ai's no-cap default rides on — unchanged behavior");
+	});
+
+	it("A BUILT-IN provider rides no injected cap (pi-ai's exact behavior preserved)", async () => {
+		const [openaiModel] = piModels().getModels("openai");
+		assert.ok(openaiModel, "the built-in openai catalog is loaded in this suite");
+		let sentBody: Record<string, unknown> | undefined;
+		const captureFetch = (async (input, init) => {
+			sentBody = JSON.parse(String(init?.body));
+			return new Response("data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } });
+		}) as typeof fetch;
+		const engine = piEngineForSpec({ provider: "openai", id: openaiModel.id, thinkingLevel: "off" });
+		const result = engine.streamFn(
+			engine.model,
+			normalizeContext({ messages: [{ role: "user", content: "hi", timestamp: 1 }], tools: [] }),
+			{ apiKey: "fixture-key", fetch: captureFetch },
+		);
+		await result.result().catch(() => undefined);
+		assert.ok(sentBody);
+		assert.equal("max_tokens" in sentBody, false, "no cap injected for a built-in");
+	});
+});
+
+// ─── 7. THE AUDITOR'S GROUND (read_graph, 2026-10-30) ──────────────────────
+describe("the auditor's one-call ground (the turn-budget fix)", () => {
+	it("the procedure reads the graph whole in ONE call and submits immediately", () => {
+		const extractionSource = readFileSync(new URL("../src/agent/subagents/extraction.ts", import.meta.url), "utf8");
+		assert.match(extractionSource, /1\. GROUND yourself first: call read_graph ONCE\./, "read_graph is the ground procedure — not the per-session crawl");
+		assert.match(extractionSource, /2\. SUBMIT\. With the whole ground seen/, "submit immediately after one read — no re-search loop");
+	});
+
+	it("the auditor's toolset carries read_graph beside the fallback reads", async () => {
+		const tools = auditorGraphTools({ chatStore: NULL_CHAT_STORE, graphStore: memoryLedgers() as never });
+		assert.ok(tools.read_graph, "read_graph joins the auditor's set");
+		const out = (await tools.read_graph!.execute!("tc", {} as never)).details as string;
+		assert.match(out, /empty/, "an empty graph answers honestly");
 	});
 });

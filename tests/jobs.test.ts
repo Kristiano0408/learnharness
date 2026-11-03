@@ -150,6 +150,14 @@ afterEach(() => {
 		}
 	}
 	for (const chatId of createdChats) discardChatDeliveries(chatId);
+	const g = globalThis as { __lhWakePipeline?: { queues: Map<string, unknown[]>; pumping: Set<string>; userSteers: Map<string, unknown[]> } };
+	if (g.__lhWakePipeline) {
+		for (const chatId of [...g.__lhWakePipeline.queues.keys()]) {
+			discardChatDeliveries(chatId);
+		}
+		g.__lhWakePipeline.userSteers.clear();
+		g.__lhWakePipeline.pumping.clear();
+	}
 	// Late wakes from a prior test must be inert: a no-op respawn can't
 	// increment anyone's counter, a no-op runner can't spawn real work.
 	setJobRespawn(() => {});
