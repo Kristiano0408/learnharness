@@ -13,6 +13,7 @@ import { useFieldCycle } from "@/components/field-cycle";
 import { SidebarToggle } from "@/components/sidebar";
 import { StatsBar } from "@/components/stats-bar";
 import { OPENING_PROMPT_FAILURE } from "@/components/opening-prompt";
+import { draftWorkspaceSeed, GRAPH_WORKSPACE_STORAGE_KEY } from "@/components/graph-view.tsx";
 import { SessionStarter } from "@/components/start-session";
 import type { TurnUsage } from "@/src/core";
 
@@ -93,6 +94,21 @@ export function Home({
 	const [mode, setMode] = useState<"teach" | "practice">("teach");
 	const [practiceProps, setPracticeProps] = useState<{ id: string; name: string; statement: string }[]>([]);
 	const [chainSelectOpen, setChainSelectOpen] = useState(false);
+	/* THE GRAPH SCOPE (graph-view filing fix, 2026-11-03): the canvas/minimal
+	 * home's current scope — Home's own composer has no filing chip, so a send
+	 * from it files into whatever graph is on screen. The URL seed wins on
+	 * mount (same one-shot rule GraphView's mount effect uses); later in-app
+	 * scope changes report live through onScopeChange. */
+	const [scopedWorkspaceId, setScopedWorkspaceId] = useState<string | null>(() => draftWorkspaceSeed(
+		typeof window === "undefined" ? null : new URLSearchParams(window.location.search).get("workspace"),
+		typeof window === "undefined" ? null : (() => {
+			try {
+				return localStorage.getItem(GRAPH_WORKSPACE_STORAGE_KEY);
+			} catch {
+				return null;
+			}
+		})(),
+	));
 	// The chain table is CONTROLLED off this id set (the lifted pick).
 	const pickedIds = useMemo(() => new Set(practiceProps.map((p) => p.id)), [practiceProps]);
 
@@ -146,6 +162,9 @@ export function Home({
 				title: t,
 				...(mode === "practice" ? { kind: "practice" } : {}),
 				...(practiceProps.length > 0 ? { graphContext: { propositions: practiceProps } } : {}),
+				// Filing follows the graph on screen (graph-view filing fix):
+				// Global/MinimalHome-global → unfiled, exactly as before.
+				...(scopedWorkspaceId !== null ? { workspaceId: scopedWorkspaceId } : {}),
 			}, fetch, JSON.stringify(catalog?.slots.strong));
 			router.push(target);
 		} catch {
@@ -182,6 +201,7 @@ export function Home({
 						practiceSelection={pickedIds}
 						onPracticeSelectionChange={setPracticeProps}
 						onChainSelectClose={() => setChainSelectOpen(false)}
+						onScopeChange={setScopedWorkspaceId}
 					/>
 				) : (
 					<MinimalHome
@@ -189,6 +209,7 @@ export function Home({
 						practiceSelection={pickedIds}
 						onPracticeSelectionChange={setPracticeProps}
 						onChainSelectClose={() => setChainSelectOpen(false)}
+						onScopeChange={setScopedWorkspaceId}
 					/>
 				)}
 			</main>

@@ -13,7 +13,7 @@ import { StatsBar } from "@/components/stats-bar";
 import { ChainTableOverlay } from "@/components/chain-table.tsx";
 import { ComposerActions, NodePickerControl, WorkspaceChip } from "@/components/composer-actions";
 import { OPENING_PROMPT_FAILURE } from "@/components/opening-prompt";
-import { graphScopedUrl } from "@/components/graph-view.tsx";
+import { graphScopedUrl, readDraftWorkspaceSeed } from "@/components/graph-view.tsx";
 import { SessionStarter } from "@/components/start-session";
 import { DRAFT_WORKSPACE_KEY, UNSORTED_KEY, type ChatSettings, type GraphSnapshot, type WorkspaceListItem } from "@/src/core";
 
@@ -280,10 +280,14 @@ export function NewSession({ initialConfigured, mode = "teach" }: { initialConfi
 	 *   chip needs it; a failed fetch leaves the draft usable, Unsorted
 	 *   only). */
 	const [workspaces, setWorkspaces] = useState<WorkspaceListItem[]>([]);
-	// The read starts on the persisted filing choice — a synchronous pass
-	// inside the lazy-fetch effect below (the picker's snapshot derives from
-	// it; a workspace draft must ground its picks in THAT workspace's graph).
-	const [filing, setFiling] = useState<string>(() => window.localStorage.getItem(DRAFT_WORKSPACE_KEY) ?? UNSORTED_KEY);
+	// The read starts on the persisted filing choice — UNLESS the draft opens
+	// off a workspace graph view (graph-view filing fix, 2026-11-03): the
+	// scope on screen (the URL's `?workspace=<id>`, else the graph selector's
+	// persisted value) seeds the filing, so a session drafted while viewing a
+	// workspace's graph files into THAT workspace instead of Unsorted.
+	const [filing, setFiling] = useState<string>(() =>
+		readDraftWorkspaceSeed() ?? window.localStorage.getItem(DRAFT_WORKSPACE_KEY) ?? UNSORTED_KEY,
+	);
 	useEffect(() => {
 		void fetch("/api/workspaces")
 			.then((r) => r.json() as Promise<{ workspaces: WorkspaceListItem[] }>)

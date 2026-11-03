@@ -275,11 +275,32 @@ describe("scoped graph stamps (Phase 6): deletion rides the graph it purged", ()
 
 // ─── 3. THE CLIENT SELECTOR SEAM (pure pins) ────────────────────────────────
 
-const { cameraStorageKey, readGraphWorkspaceScope, graphScopeOptions, graphScopedUrl, GraphChromeRow, GRAPH_WORKSPACE_STORAGE_KEY } = await import(
+const { cameraStorageKey, readGraphWorkspaceScope, graphScopeOptions, graphScopedUrl, GraphChromeRow, GRAPH_WORKSPACE_STORAGE_KEY, draftWorkspaceSeed } = await import(
 	"../components/graph-view.tsx"
 );
 const { deleteNodeUrl } = await import("../components/delete-node-dialog.tsx");
 const { announceScopedRevision } = await import("../components/chain-table.tsx");
+
+describe("the draft's filing seed off the graph view (graph-view filing fix, 2026-11-03)", () => {
+	it("a draft opening while a workspace graph is on screen files into THAT workspace — not Unsorted", () => {
+		// The URL arrival wins: ?workspace=<id> seeds the filing even with no
+		// persisted selector scope (the deep-link path from a session/chip).
+		assert.equal(draftWorkspaceSeed("ws_linear", null), "ws_linear");
+		// No URL, but the graph selector's persisted scope is a workspace: that
+		// workspace seeds the filing (the canvas-view → "+ New session" path).
+		assert.equal(draftWorkspaceSeed(null, "ws_music"), "ws_music");
+		// The URL wins over the persisted scope when both arrive.
+		assert.equal(draftWorkspaceSeed("ws_linear", "ws_music"), "ws_linear");
+	});
+
+	it("Global seeds nothing: null (the draft keeps its own persisted-default rule)", () => {
+		assert.equal(draftWorkspaceSeed(null, null), null, "no URL, no stored scope");
+		assert.equal(draftWorkspaceSeed("", ""), null);
+		assert.equal(draftWorkspaceSeed("global", "global"), null, "the legacy spelling never files a draft");
+		assert.equal(draftWorkspaceSeed("../evil", null), null, "a path-traveling URL value never reaches a store");
+		assert.equal(draftWorkspaceSeed("../evil", "ws_ok"), "ws_ok", "a corrupt URL value falls through to the persisted scope — the stored id is honest");
+	});
+});
 
 describe("the selector's pure seam (Phase 6)", () => {
 	it("lh:graph-workspace reads honestly — only a workspace id counts; everything else is Global", () => {

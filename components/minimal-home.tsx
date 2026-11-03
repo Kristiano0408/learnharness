@@ -87,6 +87,7 @@ export function MinimalHome({
 	practiceSelection,
 	onPracticeSelectionChange,
 	onChainSelectClose,
+	onScopeChange,
 }: {
 	/** The lifted pick set drives the overlay's select mode (Done instead
 	 * of the delete fence); the chip in home's composer reflects it. */
@@ -94,6 +95,10 @@ export function MinimalHome({
 	practiceSelection?: ReadonlySet<string>;
 	onPracticeSelectionChange?: (nodes: { id: string; name: string; statement: string }[]) => void;
 	onChainSelectClose?: () => void;
+	/** THE SCOPE REPORT (graph-view filing fix, 2026-11-03): Home holds this
+	 *  view's current workspace scope so its own composer can file a send
+	 *  into the graph on screen. */
+	onScopeChange?: (workspaceId: string | null) => void;
 }) {
 	const [snapshot, setSnapshot] = useState<GraphSnapshot | null>(null);
 	const [costs, setCosts] = useState<GraphCostSummary | null>(null);
@@ -110,6 +115,11 @@ export function MinimalHome({
 		const raw = searchParams?.get("workspace") ?? null;
 		return raw && raw !== "global" && /^[A-Za-z0-9_-]+$/.test(raw) ? raw : null;
 	})();
+	// Home tracks the scope this view reads (graph-view filing fix): a send
+	// from Home's composer files into the workspace graph on screen.
+	useEffect(() => {
+		onScopeChange?.(scopedWorkspaceId);
+	}, [scopedWorkspaceId, onScopeChange]);
 
 	const readState = useCallback(() => {
 		const scoped = scopedWorkspaceId === null ? "/api/graph" : `/api/graph?workspace=${encodeURIComponent(scopedWorkspaceId)}`;

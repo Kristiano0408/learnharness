@@ -199,6 +199,32 @@ export function readGraphWorkspaceScope(stored: string | null): string | null {
 	return null;
 }
 
+/** THE DRAFT'S FILING SEED from the graph view's scope (graph-view filing
+ *  fix, 2026-11-03): when a draft opens while a workspace graph is on
+ *  screen, its filing chip starts on THAT workspace — not Unsorted. The
+ *  arrival URL (`?workspace=<id>` on the home route) wins over the
+ *  persisted selector scope; Global (null) or blocked storage seeds nothing
+ *  (the draft's own persisted default rule stands). Exported pure for pins. */
+export function draftWorkspaceSeed(urlScope: string | null, storedScope: string | null): string | null {
+	const scoped = readGraphWorkspaceScope(urlScope);
+	if (scoped !== null) return scoped;
+	return readGraphWorkspaceScope(storedScope);
+}
+
+/** Read the draft's filing seed honestly off the browser's storage (the
+ *  view-state read idiom used across this file: blocked storage rides
+ *  null, never a throw). */
+export function readDraftWorkspaceSeed(): string | null {
+	try {
+		return draftWorkspaceSeed(
+			new URLSearchParams(window.location.search).get("workspace"),
+			localStorage.getItem(GRAPH_WORKSPACE_STORAGE_KEY),
+		);
+	} catch {
+		return null; // blocked storage: the draft keeps its own default rule
+	}
+}
+
 /** A selector option: the display label + the scope value it selects. */
 export interface GraphScopeOption {
 	/** null = Global (legacy) — the option never carries a workspace id. */
@@ -1116,6 +1142,7 @@ export function GraphView({
 	practiceSelection,
 	onPracticeSelectionChange,
 	onChainSelectClose,
+	onScopeChange,
 }: {
 	/** PRACTICE SELECT (owner vision, 2026-10-04): the LIFTED, persistent
 	 *  pick set — every check/clear in the chain table (however opened)
@@ -1126,6 +1153,11 @@ export function GraphView({
 	practiceSelection?: ReadonlySet<string>;
 	onPracticeSelectionChange?: (nodes: { id: string; name: string; statement: string }[]) => void;
 	onChainSelectClose?: () => void;
+	/** THE SCOPE REPORT (graph-view filing fix, 2026-11-03): Home holds the
+	 *  canvas's current workspace scope so its own composer can file a send
+	 *  into the graph on screen. Every selectScope lands here — including the
+	 *  honest vanished-workspace fallback to Global (null). */
+	onScopeChange?: (workspaceId: string | null) => void;
 }) {
 	const containerRef = useRef<HTMLDivElement | null>(null);
 	const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -1183,22 +1215,24 @@ export function GraphView({
 		if (graphWorkspaceId === null) return;
 		if (scopeWorkspaces.length > 0 && !scopeWorkspaces.some((w) => w.id === graphWorkspaceId)) {
 			setGraphWorkspaceId(null);
+			onScopeChange?.(null); // the fallback is a scope change too — Home tracks it
 			try {
 				localStorage.removeItem(GRAPH_WORKSPACE_STORAGE_KEY);
 			} catch {
 				/* best-effort */
 			}
 		}
-	}, [scopeWorkspaces, graphWorkspaceId]);
+	}, [scopeWorkspaces, graphWorkspaceId, onScopeChange]);
 	const selectScope = useCallback((id: string | null) => {
 		setGraphWorkspaceId(id);
+		onScopeChange?.(id); // the filing fix: Home's composer files into this scope
 		try {
 			if (id === null) localStorage.removeItem(GRAPH_WORKSPACE_STORAGE_KEY);
 			else localStorage.setItem(GRAPH_WORKSPACE_STORAGE_KEY, id);
 		} catch {
 			/* Storage full/blocked: the scope choice is view state — best-effort. */
 		}
-	}, []);
+	}, [onScopeChange]);
 	// The scoped home link (session-wave fix, 2026-11-03): a `?workspace=<id>`
 	// on the home URL — from a workspace session's graph entry or its draft's
 	// chip — WINS over the persisted scope on mount and lands the selector on
@@ -1210,6 +1244,7 @@ export function GraphView({
 		const scoped = readGraphWorkspaceScope(searchParams?.get("workspace") ?? null);
 		if (scoped !== null) {
 			setGraphWorkspaceId(scoped);
+			onScopeChange?.(scoped); // the URL arrival is a scope change too — Home tracks it
 			try {
 				localStorage.setItem(GRAPH_WORKSPACE_STORAGE_KEY, scoped);
 			} catch {
@@ -1225,8 +1260,11 @@ export function GraphView({
 			}
 		})();
 		const restored = readGraphWorkspaceScope(stored);
-		if (restored !== null) setGraphWorkspaceId(restored);
-	}, [searchParams]);
+		if (restored !== null) {
+			setGraphWorkspaceId(restored);
+			onScopeChange?.(restored);
+		}
+	}, [searchParams, onScopeChange]);
 	// ⌘F (shortcut wave C): the find event focuses the node search —
 	// surface-scoped, dispatched as lh:kbd-find (only this page listens).
 	const searchInputRef = useRef<HTMLInputElement>(null);
