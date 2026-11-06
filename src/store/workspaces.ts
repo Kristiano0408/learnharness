@@ -25,6 +25,7 @@ import { emit } from "../core/events.ts";
 import type { WorkspaceStore } from "../core/ports.ts";
 import type { WorkspaceRecord } from "../core/contracts.ts";
 import { CURRENT_WORKSPACE_VERSION } from "../core/contracts.ts";
+import { writeFileAtomicSync } from "./atomic-write.ts";
 
 function workspaceDir(id: string): string {
 	if (!/^[A-Za-z0-9_-]+$/.test(id)) throw new Error(`Invalid workspace id: ${id}`);
@@ -56,7 +57,7 @@ function writeWorkspace(record: WorkspaceRecord): void {
 	// The workspace owns a DIRECTORY (meta.json + Phase 4's graph/), so the
 	// choke point creates it — mkdir recursive is idempotent.
 	fs.mkdirSync(workspaceDir(record.id), { recursive: true });
-	fs.writeFileSync(metaFile(record.id), JSON.stringify({ ...record, version: CURRENT_WORKSPACE_VERSION }, null, "\t"), "utf-8");
+	writeFileAtomicSync(metaFile(record.id), JSON.stringify({ ...record, version: CURRENT_WORKSPACE_VERSION }, null, "\t"), { allowInPlaceFallback: true });
 }
 
 function getWorkspace(id: string): WorkspaceRecord | null {
