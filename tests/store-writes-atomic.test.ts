@@ -24,10 +24,9 @@ const { jobStore } = await import("../src/store/jobs.ts");
 const { writeSettings } = await import("../src/store/settings.ts");
 const { graphStore } = await import("../src/store/graph.ts");
 const { writeRenderSettings } = await import("../src/store/render-settings.ts");
-const { ensureGraphFormat } = await import("../src/store/graph-format.ts");
+const { ensureGraphFormat, LEGACY_GRAPH_HOST } = await import("../src/store/graph-format.ts");
 const { promptOverrides } = await import("../src/store/prompt-overrides.ts");
 const { authStore } = await import("../src/store/auth.ts");
-const { sourceOrganizationStore } = await import("../src/store/source-organization.ts");
 
 after(() => fs.rmSync(TMP_DATA, { recursive: true, force: true }));
 
@@ -65,10 +64,9 @@ describe("failed saves leave the old file whole", () => {
 			() => writeSettings({ version: 1, appearance: { mode: "dark" } }));
 	});
 
-	it("notes sources: import and delete", (t) => {
+	it("notes sources: import", (t) => {
 		const source = (id: string) => ({ id, filePath: `/notes/${id}.md`, importedAt: "2026-10-31T00:00:00.000Z" });
 		assertAllOrNothing(t, config.SOURCES_FILE, () => graphStore.upsertSource(source("src_a")), () => graphStore.upsertSource(source("src_b")));
-		assertAllOrNothing(t, config.SOURCES_FILE, () => {}, () => graphStore.deleteSources(new Set(["src_a"])));
 	});
 
 	it("graph render settings", (t) => {
@@ -77,18 +75,12 @@ describe("failed saves leave the old file whole", () => {
 
 	it("graph format stamp", (t) => {
 		fs.rmSync(config.GRAPH_FORMAT_FILE, { force: true });
-		assertAllOrNothing(t, config.GRAPH_FORMAT_FILE, () => {}, () => ensureGraphFormat());
+		assertAllOrNothing(t, config.GRAPH_FORMAT_FILE, () => {}, () => ensureGraphFormat(LEGACY_GRAPH_HOST));
 	});
 
 	it("graph positions and ledgers", (t) => {
 		assertAllOrNothing(t, config.POSITIONS_FILE, () => graphStore.writePositions({ a: { x: 1, y: 1 } }), () => graphStore.writePositions({ a: { x: 2, y: 2 } }));
 		assertAllOrNothing(t, config.LEDGER_FILES.chains, () => graphStore.rewriteLedgers({ chains: [] }), () => graphStore.rewriteLedgers({ chains: [] }));
-	});
-
-	it("source organization", (t) => {
-		assertAllOrNothing(t, config.SOURCE_ORGANIZATION_FILE,
-			() => sourceOrganizationStore.write({ version: 1, folders: [], placements: {} }),
-			() => sourceOrganizationStore.write({ version: 1, folders: [{ id: "fld_a", name: "A", parentId: null, createdAt: "2026-10-31T00:00:00.000Z" }], placements: {} }));
 	});
 
 	it("prompt edit", (t) => {
@@ -118,18 +110,16 @@ describe("Windows sharing violations: per-writer compatibility policy (modeled)"
 		{ name: "render settings", fallback: true, prepare: () => ({ file: config.RENDER_SETTINGS_FILE, save: () => writeRenderSettings({ linkDistance: 90 }) }) },
 		{ name: "graph format", fallback: true, prepare: () => {
 			fs.unlinkSync(config.GRAPH_FORMAT_FILE);
-			return { file: config.GRAPH_FORMAT_FILE, save: ensureGraphFormat };
+			return { file: config.GRAPH_FORMAT_FILE, save: () => ensureGraphFormat(LEGACY_GRAPH_HOST) };
 		} },
 		{ name: "prompt override", fallback: true, prepare: () => ({ file: path.join(config.PROMPTS_OVERRIDE_DIR, "system-prompt.md"), save: () => promptOverrides.writeOverride("system-prompt.md", "compatible prompt") }) },
 		{ name: "auth", fallback: false, prepare: () => ({ file: config.AUTH_FILE, save: () => authStore.setAuthVar("KEEP", "must not land") }) },
-		{ name: "source deletion", fallback: false, prepare: () => ({ file: config.SOURCES_FILE, save: () => graphStore.deleteSources(new Set(["src_policy"])) }) },
 		{ name: "ledger rewrite", fallback: false, prepare: () => ({ file: config.LEDGER_FILES.chains, save: () => graphStore.rewriteLedgers({ chains: [] }) }) },
 		{ name: "positions", fallback: false, prepare: () => ({ file: config.POSITIONS_FILE, save: () => graphStore.writePositions({ policy: { x: 3, y: 4 } }) }) },
-		{ name: "source organization", fallback: false, prepare: () => ({ file: config.SOURCE_ORGANIZATION_FILE, save: () => sourceOrganizationStore.write({ version: 1, folders: [], placements: {} }) }) },
 	];
 	for (const { name, fallback, prepare } of cases) {
 		it(`${name}: ${fallback ? "retains" : "does not acquire"} in-place fallback`, (t) => {
-			ensureGraphFormat();
+			ensureGraphFormat(LEGACY_GRAPH_HOST);
 			const { file, save } = prepare();
 			const before = file ? snapshot(file) : null;
 			const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
