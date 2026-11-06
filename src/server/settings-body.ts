@@ -25,7 +25,7 @@ import type {
 	RoleModelOverride,
 	CustomEndpointsSettings,
 } from "../core/settings.ts";
-import { BACKGROUND_MODEL_ROLES, COMPACTION_THRESHOLD_FLOOR, CUSTOM_ENDPOINT_MAX_TOKENS_FLOOR, EXTRACTION_CHUNK_TOKENS_FLOOR, MODEL_SLOTS, isValidCustomEndpointId, sanitizeCustomBaseUrl } from "../core/settings.ts";
+import { BACKGROUND_MODEL_ROLES, COMPACTION_THRESHOLD_FLOOR, CUSTOM_ENDPOINT_MAX_TOKENS_FLOOR, EXTRACTION_CHUNK_TOKENS_FLOOR, MODEL_SLOTS, THINKING_LEVELS, isValidCustomEndpointId, sanitizeCustomBaseUrl } from "../core/settings.ts";
 import { WRITABLE_TOOL_KEYS } from "../core/pending.ts";
 import { isDictationLanguage } from "../core/dictation.ts";
 
@@ -41,6 +41,7 @@ export function parseSettingsBody(body: unknown): SettingsBodyResult<ChatSetting
 	const raw = body as {
 		model?: { provider?: unknown; id?: unknown };
 		thinkingLevel?: unknown;
+		thinkingMaxTokens?: unknown;
 	};
 	const settings: ChatSettings = {};
 	if (raw.model !== undefined) {
@@ -59,6 +60,21 @@ export function parseSettingsBody(body: unknown): SettingsBodyResult<ChatSetting
 			return { ok: false, error: "thinkingLevel must be a string" };
 		}
 		settings.thinkingLevel = raw.thinkingLevel as ThinkingLevel;
+	}
+	// thinkingMaxTokens (custom thinking wave, 2026-11-03): strict on the
+	// shape (a bad number is a 400, never a silent clamp). The floor's
+	// rationale mirrors the custom endpoint's: a reasoning phase under
+	// ~100 tokens cannot carry a useful chain. Custom-only by contract —
+	// other providers' budgets are pi-resolved per level and this field is
+	// inert for them (never sent).
+	if (raw.thinkingMaxTokens !== undefined) {
+		if (typeof raw.thinkingMaxTokens !== "number" || !Number.isFinite(raw.thinkingMaxTokens) || !Number.isInteger(raw.thinkingMaxTokens)) {
+			return { ok: false, error: "thinkingMaxTokens must be an integer" };
+		}
+		if (raw.thinkingMaxTokens < CUSTOM_ENDPOINT_MAX_TOKENS_FLOOR) {
+			return { ok: false, error: `thinkingMaxTokens must be at least ${CUSTOM_ENDPOINT_MAX_TOKENS_FLOOR} (a smaller reasoning budget cannot carry a useful chain)` };
+		}
+		settings.thinkingMaxTokens = raw.thinkingMaxTokens;
 	}
 	// Wave 7 killed the graph-context injection (owner: zero configuration
 	// beyond chat models — the prober reads its map through tools now); its
@@ -451,6 +467,39 @@ export function parseCustomEndpointsSettingsBody(body: unknown): SettingsBodyRes
 					};
 				}
 				endpoint.maxOutputTokens = entry.maxOutputTokens;
+			}
+			// supportedThinkingLevels (custom thinking wave, 2026-11-03): the
+			// user's claim about what the server can reason with. Strict write
+			// side: an array of known level strings; "off" is implicit (the
+			// picker always offers it) and a list holding only it clears the
+			// field — reasoning stays off, today's behavior.
+			if (entry.supportedThinkingLevels !== undefined) {
+				if (!Array.isArray(entry.supportedThinkingLevels)) {
+					return { ok: false, error: `endpoint "${key}" supportedThinkingLevels must be an array of thinking levels` };
+				}
+				const levels: ThinkingLevel[] = [];
+				for (const level of entry.supportedThinkingLevels) {
+					if (typeof level !== "string" || !THINKING_LEVELS.includes(level as ThinkingLevel)) {
+						return { ok: false, error: `endpoint "${key}" supportedThinkingLevels contains an unknown level ${JSON.stringify(level)}` };
+					}
+					if (level !== "off" && !levels.includes(level as ThinkingLevel)) levels.push(level as ThinkingLevel);
+				}
+				if (levels.length) endpoint.supportedThinkingLevels = levels;
+			}
+			// maxThinkingTokens (custom thinking wave): the reasoning-phase
+			// ceiling ladder — reject-with-rationale, same floor discipline
+			// as the answer ceiling.
+			if (entry.maxThinkingTokens !== undefined) {
+				if (typeof entry.maxThinkingTokens !== "number" || !Number.isFinite(entry.maxThinkingTokens) || !Number.isInteger(entry.maxThinkingTokens)) {
+					return { ok: false, error: `endpoint "${key}" maxThinkingTokens must be an integer` };
+				}
+				if (entry.maxThinkingTokens < CUSTOM_ENDPOINT_MAX_TOKENS_FLOOR) {
+					return {
+						ok: false,
+						error: `endpoint "${key}" maxThinkingTokens must be at least ${CUSTOM_ENDPOINT_MAX_TOKENS_FLOOR} (a smaller reasoning budget cannot carry a useful chain)`,
+					};
+				}
+				endpoint.maxThinkingTokens = entry.maxThinkingTokens;
 			}
 			parsed[key] = endpoint;
 		}

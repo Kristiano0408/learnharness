@@ -40,6 +40,7 @@ import {
 	resolveRoleSpec,
 } from "../core/settings-resolution.ts";
 import { modelsNotConfigured, providerKeyMissing as providerKeyMissingEnvelope, type ProviderKeyMissing } from "../core/settings.ts";
+import { endpointMaxThinkingTokens } from "./model-catalog.ts";
 import { beginTurn, endTurn } from "./turn-liveness.ts";
 import { applyParkedDismissal } from "./dismissal-park.ts";
 import { registerTurn, rememberTurnFailure, unregisterTurn } from "./turn-runs.ts";
@@ -230,7 +231,14 @@ export async function handleChatInput(
 	// write-ahead persist (nothing durable changes), and every downstream
 	// resolution (jobs/extraction gate per-need on their own tiers).
 	const effective = effectiveSettings();
-	const conversation = resolveConversationSpec(record.settings, effective.models.strong);
+	// The endpoint default under the chat's own reasoning ceiling (custom
+	// thinking wave, 2026-11-03): resolved from the settings record by the
+	// server band (core stays fs-free); undefined for a non-custom provider.
+	const conversation = resolveConversationSpec(
+		record.settings,
+		effective.models.strong,
+		endpointMaxThinkingTokens(record.settings?.model ?? effective.models.strong),
+	);
 	if (!conversation) {
 		const envelope = modelsNotConfigured(["strong"]);
 		console.info(`[chat ${chatId}] turn refused — ${JSON.stringify(envelope)}`);
@@ -652,7 +660,12 @@ export async function handleChatInput(
 				if (process.env.NODE_ENV !== "test" && (!requestCycle || requestCycle.dispatched))
 					kickCompaction(() => {
 						const fresh = effectiveSettings();
-						const spec = resolveConversationSpec(stores.chatStore.getChat(chatId)?.settings, fresh.models.strong);
+						const chatSettings = stores.chatStore.getChat(chatId)?.settings;
+						const spec = resolveConversationSpec(
+							chatSettings,
+							fresh.models.strong,
+							endpointMaxThinkingTokens(chatSettings?.model ?? fresh.models.strong),
+						);
 						if (!spec || !connectionBackgroundAllowed(spec.provider)) return null;
 						// STRICTLY SYNC here on purpose (custom catalog integrity, 2026-10-29):
 						// kickCompaction's deps builder is a synchronous pre-check, and the turn

@@ -68,6 +68,12 @@ function EndpointRow({
 	// (the server's own report; with nothing reported, no cap: the server's
 	// default governs).
 	const [maxOutput, setMaxOutput] = useState(endpoint?.maxOutputTokens != null ? String(endpoint.maxOutputTokens) : "");
+	// The thinking config (custom thinking wave, 2026-11-03): the levels
+	// this server can reason with (the user's claim — /v1/models reports no
+	// thinking truth), edited as checkboxes; empty = reasoning off (today's
+	// shape). Plus this endpoint's default reasoning ceiling per level.
+	const [levels, setLevels] = useState<string[]>(endpoint?.supportedThinkingLevels ?? []);
+	const [maxThinking, setMaxThinking] = useState(endpoint?.maxThinkingTokens != null ? String(endpoint.maxThinkingTokens) : "");
 	const [error, setError] = useState<string | null>(null);
 	const [busy, setBusy] = useState(false);
 
@@ -79,7 +85,9 @@ function EndpointRow({
 		setRequiresKey(endpoint?.requiresKey ?? false);
 		setVision(endpoint?.vision ?? false);
 		setMaxOutput(endpoint?.maxOutputTokens != null ? String(endpoint.maxOutputTokens) : "");
-	}, [endpoint?.id, endpoint?.label, endpoint?.baseUrl, endpoint?.requiresKey, endpoint?.vision, endpoint?.maxOutputTokens]);
+		setLevels(endpoint?.supportedThinkingLevels ?? []);
+		setMaxThinking(endpoint?.maxThinkingTokens != null ? String(endpoint.maxThinkingTokens) : "");
+	}, [endpoint?.id, endpoint?.label, endpoint?.baseUrl, endpoint?.requiresKey, endpoint?.vision, endpoint?.maxOutputTokens, endpoint?.supportedThinkingLevels, endpoint?.maxThinkingTokens]);
 
 	async function save() {
 		if (!baseUrl.trim() || busy) return;
@@ -88,6 +96,9 @@ function EndpointRow({
 		// Mirror the server parser: empty clears the ceiling; a bad number
 		// rides unset (the server never sees it).
 		const maxTokens = maxOutput.trim() === "" ? undefined : Number(maxOutput);
+		// Mirror the server parser: empty clears the ceiling; a bad number
+		// rides unset (the server never sees it). Same for the thinking ladder.
+		const thinkTokens = maxThinking.trim() === "" ? undefined : Number(maxThinking);
 		const err = await onSave({
 			id: endpoint?.id ?? slugFrom(baseUrl),
 			label: label.trim(),
@@ -96,6 +107,9 @@ function EndpointRow({
 			vision,
 			maxOutputTokens:
 				maxTokens !== undefined && Number.isInteger(maxTokens) && maxTokens >= 100 ? maxTokens : undefined,
+			supportedThinkingLevels: levels.length ? (levels as CustomEndpoint["supportedThinkingLevels"]) : undefined,
+			maxThinkingTokens:
+				thinkTokens !== undefined && Number.isInteger(thinkTokens) && thinkTokens >= 100 ? thinkTokens : undefined,
 		});
 		if (err) setError(err);
 		setBusy(false);
@@ -166,6 +180,43 @@ function EndpointRow({
 						/>
 						answer max
 					</label>
+					{/* The thinking config (custom thinking wave, 2026-11-03): the levels this server can reason with (the user's claim — /v1/models reports no thinking truth; off is implicit) + its default per-level reasoning ceiling. */}
+					<label className="flex shrink-0 items-center gap-1.5 font-ui text-xs text-muted-foreground">
+						<input
+							type="number"
+							min={100}
+							value={maxThinking}
+							onChange={(e) => setMaxThinking(e.target.value)}
+							onKeyDown={(e) => {
+								if (e.key === "Enter") void save();
+							}}
+							placeholder="default"
+							aria-label="Reasoning ceiling (tokens)"
+							title="Max reasoning tokens per answer on this server, for every thinking level. A session can override it in the chat's Thinking menu. Empty = pi's default ladder."
+							data-testid={`${testid}-maxthinking`}
+							disabled={busy}
+							className="h-7 w-24 min-w-0 rounded-sm border border-border bg-background px-1.5 font-mono text-xs text-foreground outline-none placeholder:text-muted-foreground/60 focus:border-muted-foreground/50"
+						/>
+						thinking max
+					</label>
+					<div className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1" role="group" aria-label="Supported thinking levels" data-testid={`${testid}-levels`}>
+						{THINKING_EDIT_LEVELS.map((level) => (
+							<label key={level} className="flex items-center gap-1 font-mono text-xs text-muted-foreground">
+								<input
+									type="checkbox"
+									checked={levels.includes(level)}
+									onChange={(e) => {
+										setLevels((prev) => (e.target.checked ? [...prev, level] : prev.filter((l) => l !== level)));
+									}}
+									data-testid={`${testid}-level-${level}`}
+									disabled={busy}
+									className="size-3.5 accent-current"
+								/>
+								{level}
+							</label>
+						))}
+						<span className="font-ui text-xs text-muted-foreground/70">thinking levels</span>
+					</div>
 					<button
 						type="button"
 						onClick={() => void save()}
@@ -229,6 +280,11 @@ function EndpointRow({
 		</div>
 	);
 }
+
+/** The levels the endpoint editor offers as checkboxes: pi's ladder minus
+ *  "off" (off is implicit — clearing every box means reasoning off, today's
+ *  shape). Mirrors core/settings.ts's THINKING_LEVELS. */
+const THINKING_EDIT_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 /** Derive a stable slug from a base URL for a brand-new endpoint (the
  *  server's own slug rules apply; the server re-validates). */

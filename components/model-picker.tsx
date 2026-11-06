@@ -184,6 +184,25 @@ export function ModelControl({ chatId, onModelChange }: { chatId?: string; onMod
 	// truth (a pick riding an unsupported level lands CLAMPED — the pill
 	// shows the stored value). No notifySettingsSaved: the write touches
 	// one session's record, not the slots — no other surface reads it.
+	// The session's reasoning ceiling as the record holds it — undefined
+	// when nothing was ever set (the endpoint default or pi's ladder then
+	// governs; the UI never invents a number).
+	const storedThinkingMax = session?.settings?.thinkingMaxTokens;
+	// The field's LOCAL draft (2026-11-06 fix): the number is UNCONTROLLED
+	// while typing (a controlled `value` + no onChange renders a READ-ONLY
+	// input — React's own warning; the owner's "non mi fa scrivere"). Seeded
+	// from the stored record whenever that record lands or changes.
+	const [thinkingMaxDraft, setThinkingMaxDraft] = useState(storedThinkingMax != null ? String(storedThinkingMax) : "");
+	useEffect(() => {
+		setThinkingMaxDraft(storedThinkingMax != null ? String(storedThinkingMax) : "");
+	}, [storedThinkingMax]);
+	const customProvider = effectiveProvider !== undefined && effectiveProvider.startsWith("custom:");
+	// The ceiling control is honest about when it has an effect: only a
+	// custom-endpoint model with thinking ON reads it (the engine seam —
+	// src/agent/models.ts's budget injection). Everywhere else the field
+	// would be decoration.
+	const showThinkingMax = chatId !== undefined && customProvider && effectiveLevel !== undefined && effectiveLevel !== "off";
+
 	const saveChat = useCallback(
 		async (next: ChatSettings) => {
 			setError(null);
@@ -212,10 +231,14 @@ export function ModelControl({ chatId, onModelChange }: { chatId?: string; onMod
 	// level; chat mode writes the session's own record (any pick pins it),
 	// draft mode composes the strong slot (siblings preserved,
 	// replace-whole-section discipline).
+	// One apply seam over both write paths: a pick names provider + id +
+	// level (+ the session's reasoning ceiling in chat mode — replace-whole
+	// carries it verbatim on every write, clear = undefined). Draft mode
+	// has no per-session ceiling: the endpoint's own default is the ladder.
 	const apply = useCallback(
-		(provider: string, id: string, level: ThinkingLevel | undefined) => {
+		(provider: string, id: string, level: ThinkingLevel | undefined, thinkingMaxTokens?: number) => {
 			if (chatId) {
-				void saveChat({ model: { provider, id }, thinkingLevel: level });
+				void saveChat({ model: { provider, id }, thinkingLevel: level, ...(thinkingMaxTokens !== undefined ? { thinkingMaxTokens } : {}) });
 			} else {
 				// composeSlotModel's empty-string convention: no level = unset.
 				void save(composeSlotModel(models, "strong", provider, id, level ?? ""));
@@ -244,11 +267,13 @@ export function ModelControl({ chatId, onModelChange }: { chatId?: string; onMod
 			const idx = effectiveLevel === undefined ? -1 : levels.indexOf(effectiveLevel);
 			const next = levels[(idx + 1) % levels.length];
 			if (next === undefined) return;
-			apply(effectiveProvider ?? "", effectiveId ?? "", next);
+			// The session's stored ceiling rides the cycle (replace-whole
+			// discipline — cycling levels must not wipe a configured budget).
+			apply(effectiveProvider ?? "", effectiveId ?? "", next, storedThinkingMax);
 		};
 		window.addEventListener("lh:kbd-cycle-thinking", onCycleThinking);
 		return () => window.removeEventListener("lh:kbd-cycle-thinking", onCycleThinking);
-	}, [levels, effectiveLevel, effectiveProvider, effectiveId, apply]);
+	}, [levels, effectiveLevel, effectiveProvider, effectiveId, storedThinkingMax, apply]);
 
 	// Selecting a model (click and Enter share one path): keep the
 	// thinking level only when the new model supports it — otherwise
@@ -367,10 +392,50 @@ export function ModelControl({ chatId, onModelChange }: { chatId?: string; onMod
 					<ThinkingMenuList
 						levels={catalog ? levels : []}
 						effectiveLevel={effectiveLevel}
-						onPick={(level) => apply(effectiveProvider ?? "", effectiveId ?? "", level as ThinkingLevel)}
+						onPick={(level) => apply(effectiveProvider ?? "", effectiveId ?? "", level as ThinkingLevel, storedThinkingMax)}
 						empty={catalog ? (effectiveId ? `${prettyModel(effectiveId)} has no thinking levels.` : "Pick a model first.") : "Loading…"}
 						footer="Levels this model actually supports"
 					/>
+					{/* The reasoning ceiling (custom thinking wave, 2026-11-03): a per-session cap on ONE answer's reasoning phase, for a custom-endpoint model with thinking on. Enter writes; blur commits too (the outside-pointer dismissal still closes the menu — the value already landed). Empty = unset: the endpoint's default or pi's ladder governs. */}
+					{showThinkingMax && (
+						<div className="mt-1.5 flex items-center gap-1.5 border-t px-2 pt-1.5" data-testid="thinking-max-row">
+							<input
+								type="number"
+								min={100}
+								defaultValue={thinkingMaxDraft}
+								placeholder="default"
+								aria-label="Reasoning max tokens (this session)"
+								title="Max reasoning tokens per answer in this session. Empty = the endpoint's default or pi's ladder."
+								data-testid="thinking-max-tokens"
+								className="h-7 w-24 min-w-0 rounded-sm border bg-background px-1.5 font-mono text-xs text-card-foreground outline-none placeholder:text-muted-foreground/60 focus:border-muted-foreground/50"
+								onChange={(e) => setThinkingMaxDraft(e.currentTarget.value)}
+								// Commit on Enter AND blur (the ceiling is a number
+								// field, not a menu row: clicking away commits the
+								// typed value — the owner's "non funziona" fix).
+								// Blur must not re-apply an ALREADY-committed value
+								// (an Enter commit + click-away blur would double
+								//-write; a no-op when the draft matches what is
+								// stored). A number input's "".trim() is also "",
+								// so clearing commits the unset state honestly.
+								onBlur={(e) => {
+									const raw = e.currentTarget.value.trim();
+									const next = raw === "" ? undefined : Number(raw);
+									if (next === storedThinkingMax) return;
+									apply(effectiveProvider ?? "", effectiveId ?? "", effectiveLevel, next);
+								}}
+								onKeyDown={(e) => {
+									e.stopPropagation();
+									if (e.key === "Enter") {
+										const raw = e.currentTarget.value.trim();
+										const next = raw === "" ? undefined : Number(raw);
+										if (next === storedThinkingMax) return;
+										apply(effectiveProvider ?? "", effectiveId ?? "", effectiveLevel, next);
+									}
+								}}
+							/>
+							<span className="text-muted-foreground">thinking max</span>
+						</div>
+					)}
 					{error && <div className="mt-1 text-destructive">{error}</div>}
 				</MenuShell>
 			)}

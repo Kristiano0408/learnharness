@@ -9,6 +9,7 @@ import {
 	type Provider,
 	type StreamFunction,
 } from "@earendil-works/pi-ai";
+import { MIN_ANSWER_TOKENS } from "@earendil-works/pi-ai/api/simple-options";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
@@ -16,6 +17,7 @@ import { type ModelRole } from "../../config.ts";
 import {
 	CUSTOM_PROVIDER_PREFIX,
 	DEFAULT_THINKING_ORDER,
+	THINKING_LEVELS,
 	customEndpointEnvVar,
 	isCustomProviderId,
 	type CustomEndpoint,
@@ -56,6 +58,8 @@ export interface PiEngine {
 }
 
 export type { ThinkingLevel };
+
+
 
 let collection: ReturnType<typeof createModels> | undefined;
 
@@ -122,12 +126,18 @@ function positiveInt(value: unknown, fallback: number): number {
 	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : fallback;
 }
 
-/** Map one discovered `/v1/models` entry to a pi-ai chat model. Reasoning
- *  stays false (the endpoint's thinking format is not introspectable from
- *  the catalog: a user wanting reasoning output pins the model's level to
- *  "off" or tunes the endpoint directly). */
+/** Map one discovered `/v1/models` entry to a pi-ai chat model. The
+ *  endpoint's THINKING truth (custom thinking wave, 2026-11-03): an
+ *  OpenAI-compat server reports nothing reasoning-capable from
+ *  `/v1/models`, so the endpoint's `supportedThinkingLevels` toggle is the
+ *  user's explicit claim — set = every discovered model federates as a
+ *  reasoning model carrying pi's `thinkingLevelMap` (the ladder with "off"
+ *  mapped to llama.cpp's documented disable value, and null-marked entries
+ *  keeping pi's level validation honest); unset = today's shape untouched
+ *  (`reasoning: false`, the picker shows only "off"). */
 function toCustomModel(endpoint: CustomEndpoint, entry: DiscoveredModel): Model<"openai-completions"> | undefined {
 	if (typeof entry.id !== "string" || !entry.id) return undefined;
+	const thinkingLevels = endpoint.supportedThinkingLevels ?? [];
 	return {
 		id: entry.id,
 		name: typeof entry.name === "string" && entry.name ? entry.name : entry.id,
@@ -139,7 +149,41 @@ function toCustomModel(endpoint: CustomEndpoint, entry: DiscoveredModel): Model<
 		// toggle (not the discovery) decides whether the model federates
 		// into the vision slot's picker.
 		input: endpoint.vision ? ["text", "image"] : ["text"],
-		reasoning: false,
+		reasoning: thinkingLevels.length > 0,
+		// pi's level map (2026-11-03,verified against pi-ai's
+		// getSupportedThinkingLevels): a MISSING entry through "high" counts
+		// as supported, so the claimed set must be null-marked or the picker
+		// would federate levels the user never checked. Claimed levels map to
+		// their own name (the wire effort string); the standard ladder
+		// minimal/low/medium/high always gets an entry (null = unsupported);
+		// xhigh/max stay absent unless claimed (pi: absent = unsupported).
+		// THE "off" ENTRY IS THE DISABLE CHANNEL, not decoration (owner fix,
+		// 2026-11-06): with NO off entry pi sends NOTHING when thinking is
+		// off, and llama.cpp then falls back to the MODEL TEMPLATE'S default —
+		// a reasoner template thinks anyway, so "off" looked broken. pi-ai's
+		// generic openai-completions branch (openai-completions.js): a STRING
+		// thinkingLevelMap.off rides `reasoning_effort: <that string>` when the
+		// request level is off — and llama.cpp documents exactly this kill
+		// switch (server-common.cpp: reasoning_effort == "none" →
+		// enable_thinking = false; tools/server/README.md: "reasoning_effort:
+		// If `none`, reasoning/thinking is disabled"). Servers that do not
+		// know the value ignore the param like any sampling field — never an
+		// error. Non-reasoning endpoints (no levels claimed) keep an empty
+		// map: pi's off branch requires model.reasoning, so their wire shape
+		// is untouched.
+		...(thinkingLevels.length
+			? {
+					thinkingLevelMap: {
+						off: "none",
+						...Object.fromEntries(
+							THINKING_LEVELS.filter((level) => level !== "off").map((level) => [
+								level,
+								thinkingLevels.includes(level) ? level : null,
+							]),
+						),
+					},
+				}
+			: {}),
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		// CONTEXT: the standard OpenAI field first, then llama.cpp's
 		// `meta.n_ctx` (what local servers actually report, e.g. strata's
@@ -164,7 +208,23 @@ function toCustomModel(endpoint: CustomEndpoint, entry: DiscoveredModel): Model<
 		// default instead). pi-ai's URL detection cannot know a localhost, so
 		// without this compat the cap would ride a field the server throws
 		// away.
-		compat: { maxTokensField: "max_tokens" },
+		// thinkingTokenBudgetField (custom thinking wave, 2026-11-03,
+		// corrected against llama.cpp master + pi-ai's own compat-schema):
+		// llama.cpp reads the reasoning cap from `reasoning_budget` top-level
+		// OR `thinking_budget_tokens`/`reasoning_budget_tokens` (verified in
+		// server-common.cpp: `json_value(body, "reasoning_budget_tokens",
+		// json_value(body, "thinking_budget_tokens", -1))`). pi-ai's union
+		// documents the same mapping — "thinking_token_budget" is vLLM,
+		// "thinking_budget" Qwen/DashScope/SGLang, "thinking_budget_tokens"
+		// llama.cpp. The first pick was wrong for a llama.cpp/Ollama server:
+		// an unknown field is silently dropped, so the budget was dead weight.
+		// `reasoning_effort` stays the level channel (llama.cpp's OAI endpoint
+		// passes it to the chat template; off now rides the explicit
+		// "none" through the thinkingLevelMap.off entry above — a field that
+		// merely ABSSENT leaves to the template default). A server that does
+		// not know the budget field ignores it like every other unknown
+		// sampling param — never a request error.
+		compat: { maxTokensField: "max_tokens", thinkingTokenBudgetField: "thinking_budget_tokens" },
 	};
 }
 
@@ -267,11 +327,17 @@ function customEndpointSignature(endpoint: CustomEndpoint): string {
 	// maxOutputTokens joins (2026-10-30): the ceiling is baked into the
 	// provider's discovered models, so changing it IS request-facing — the
 	// provider re-registers (and re-discovers) to carry it.
+	// The thinking config joins likewise (custom thinking wave,
+	// 2026-11-03): reasoning + the level map ride the discovered models too.
+	// maxThinkingTokens deliberately does NOT join: it is a per-request
+	// option, not part of the provider's catalog shape — changing the budget
+	// must not destroy the discovered catalog.
 	return JSON.stringify([
 		endpoint.baseUrl,
 		endpoint.requiresKey === true,
 		endpoint.vision === true,
 		endpoint.maxOutputTokens ?? null,
+		endpoint.supportedThinkingLevels ?? null,
 	]);
 }
 
@@ -351,6 +417,12 @@ export interface ResolvedModelSpec {
 	provider: string;
 	id: string;
 	thinkingLevel?: ThinkingLevel;
+	/** The resolved reasoning-phase ceiling ladder for THIS spec (custom
+	 *  thinking wave, 2026-11-03): chat override > endpoint default >
+	 *  undefined. Only a custom provider's stream path reads it — pi caps
+	 *  the reasoning phase per level and puts the number on the wire
+	 *  through the server's budget field (`thinking_token_budget`). */
+	thinkingMaxTokens?: number;
 }
 
 /** The first entry of the baked default order the model supports (owner,
@@ -389,6 +461,18 @@ function assembleEngine(spec: ResolvedModelSpec, model: Model<Api>, background: 
 	const level = spec.thinkingLevel
 		? clampThinkingLevel(model, spec.thinkingLevel)
 		: defaultThinkingLevel(model);
+	// THE REASONING CAP (custom thinking wave, 2026-11-03): the resolved
+	// ladder (chat > endpoint) rides pi's `thinkingBudgets` — the
+	// openai-completions API caps the reasoning phase per level and emits the
+	// number through the compat budget field. pi clamps the budget under the
+	// response ceiling (max_tokens ?? model.maxTokens), so a configured
+	// ceiling must have an EXPLICIT response ceiling leaving room for it:
+	// reasoning cap + MIN_ANSWER_TOKENS (pi's floor for the answer).
+	// Without that derivation a no-ceiling endpoint would collapse the budget
+	// to zero and silently drop the field (a configured limit is never
+	// silently dropped). No ceiling configured: pi-ai's own default ladder
+	// governs and the wire shape is untouched — today's unchanged behavior.
+	const thinkingCap = isCustomSpec(spec) && level !== "off" ? spec.thinkingMaxTokens : undefined;
 	return {
 		model,
 		level,
@@ -410,7 +494,13 @@ function assembleEngine(spec: ResolvedModelSpec, model: Model<Api>, background: 
 				return models.streamSimple.bind(models)(requestModel, context, {
 					...options,
 					...levelOption,
-					maxTokens: model.maxTokens,
+					// With a configured reasoning cap the response ceiling grows
+					// to leave pi's answer room (the derivation above); without
+					// one this is today's unchanged catalog ceiling.
+					maxTokens: thinkingCap ? Math.max(model.maxTokens, thinkingCap + MIN_ANSWER_TOKENS) : model.maxTokens,
+					...(thinkingCap
+						? { thinkingBudgets: { minimal: thinkingCap, low: thinkingCap, medium: thinkingCap, high: thinkingCap } }
+						: {}),
 				});
 			}
 			const stream = spec.provider === "chatgpt" ? chatGPTStream(purpose, lifecycle) : nativeId ? nativeSubscriptionStream(models.getProvider(nativeId)!, purpose, lifecycle) : models.streamSimple.bind(models);

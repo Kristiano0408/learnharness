@@ -101,10 +101,14 @@ export interface EffectiveSettings {
  *  model override over the STRONG slot, each field independent (a bare
  *  chat thinking level rides the strong slot's model). null = no model
  *  anywhere — the turn gate refuses with the 503 models_not_configured
- *  envelope. */
+ *  envelope. `endpointMaxThinkingTokens` (custom thinking wave,
+ *  2026-11-03) is the ENDPOINT default of the reasoning ceiling, resolved
+ *  server-side by the caller (core never reads fs): it rides the spec only
+ *  as the fallback under a chat's own `thinkingMaxTokens` override. */
 export function resolveConversationSpec(
 	chat: ChatSettings | undefined,
 	strong: EffectiveSlot | null,
+	endpointMaxThinkingTokens?: number,
 ): EffectiveModelSpec | null {
 	const model = chat?.model ?? (strong ? { provider: strong.provider, id: strong.id } : undefined);
 	if (!model) return null;
@@ -112,6 +116,11 @@ export function resolveConversationSpec(
 		provider: model.provider,
 		id: model.id,
 		thinkingLevel: chat?.thinkingLevel ?? strong?.thinkingLevel,
+		...(chat?.thinkingMaxTokens !== undefined
+			? { thinkingMaxTokens: chat.thinkingMaxTokens }
+			: endpointMaxThinkingTokens !== undefined
+				? { thinkingMaxTokens: endpointMaxThinkingTokens }
+				: {}),
 	};
 }
 

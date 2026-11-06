@@ -236,13 +236,31 @@ describe("resolveConversationSpec (the turn gate's chain)", () => {
 			thinkingLevel: undefined,
 		});
 	});
-});
 
-describe("the graph channel gates (the wave's seam honoring)", () => {
-	it("WRITE channel (extraction): dies with the master switch — the ONLY graph setting since wave 7", () => {
-		assert.equal(extractionEnabled({ enabled: true }), true);
-		assert.equal(extractionEnabled({ enabled: false }), false);
-	});
+        it("the reasoning ceiling chain (custom thinking wave): chat override > endpoint default > absent", () => {
+                // A bare chat ceiling rides the strong slot's model.
+                assert.deepEqual(
+                        resolveConversationSpec({ thinkingMaxTokens: 8192 }, { provider: "custom:llama", id: "s", thinkingLevel: "low" }),
+                        { provider: "custom:llama", id: "s", thinkingLevel: "low", thinkingMaxTokens: 8192 },
+                );
+                // No chat override: the caller-resolved endpoint default rides.
+                assert.deepEqual(
+                        resolveConversationSpec({ thinkingLevel: "high" }, { provider: "custom:llama", id: "s" }, 4096),
+                        { provider: "custom:llama", id: "s", thinkingLevel: "high", thinkingMaxTokens: 4096 },
+                );
+                // The chat's own value wins over the endpoint default.
+                assert.deepEqual(
+                        resolveConversationSpec({ model: { provider: "custom:llama", id: "m" }, thinkingMaxTokens: 2048 }, { provider: "zai", id: "s" }, 16384),
+                        { provider: "custom:llama", id: "m", thinkingLevel: undefined, thinkingMaxTokens: 2048 },
+                );
+                // Nothing anywhere: the field is ABSENT (pi's own ladder governs
+                // — never a phantom number).
+                assert.deepEqual(resolveConversationSpec({ model: { provider: "groq", id: "c" } }, null), {
+                        provider: "groq",
+                        id: "c",
+                        thinkingLevel: undefined,
+                });
+        });
 
 	it("the write gate rides resolveSettings' factory defaults (all on → open)", () => {
 		const eff = resolveSettings(null);

@@ -199,6 +199,21 @@ export function catalogProviders(): CatalogProvider[] {
 function keyedProviderIds(): Set<string> {
 	return new Set(catalogProviders().filter((p) => p.keyPresent).map((p) => p.id));
 }
+
+/** The ENDPOINT default under a chat's reasoning ceiling (custom thinking
+ *  wave, 2026-11-03): the custom endpoint's `maxThinkingTokens` for the
+ *  model a conversation chain resolves to. undefined everywhere else — a
+ *  non-custom provider (or a model-less chain) has no endpoint budget, and
+ *  the engine then rides pi's own per-level ladder. The chat's own
+ *  override wins above this; the resolution lives in core
+ *  (resolveConversationSpec), the fs read lives here. */
+export function endpointMaxThinkingTokens(
+	model: { provider: string; id: string } | null | undefined,
+): number | undefined {
+	if (!model || !isCustomProviderId(model.provider)) return undefined;
+	const endpoint = customEndpoints().find((e) => customProviderId(e.id) === model.provider);
+	return endpoint?.maxThinkingTokens;
+}
 /** Project one catalog model to the client DTO. */
 export function toModelDto(model: Model<Api>): ModelDto {
 	return {

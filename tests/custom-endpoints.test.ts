@@ -92,6 +92,33 @@ describe("sanitizeUserSettings — customEndpoints section", () => {
 		// unknown-key passthrough.
 		assert.deepEqual(out.customEndpoints, {});
 	});
+
+	it("thinking fields round-trip; junk clamps-never-rejects (off and duplicates drop, a small budget drops)", () => {
+		const out = sanitizeUserSettings({
+			version: 1,
+			customEndpoints: {
+				endpoints: {
+					ok: {
+						id: "ok",
+						baseUrl: "http://x",
+						supportedThinkingLevels: ["off", "low", "low", "medium", "bogus", 7],
+						maxThinkingTokens: 4096,
+					},
+					tiny: { id: "tiny", baseUrl: "http://y", maxThinkingTokens: 50 },
+					onlyoff: { id: "onlyoff", baseUrl: "http://z", supportedThinkingLevels: ["off"] },
+				},
+			},
+		});
+		assert.ok(out);
+		assert.deepEqual(out.customEndpoints, {
+			endpoints: {
+				ok: { id: "ok", baseUrl: "http://x", supportedThinkingLevels: ["low", "medium"], maxThinkingTokens: 4096 },
+				tiny: { id: "tiny", baseUrl: "http://y" },
+				onlyoff: { id: "onlyoff", baseUrl: "http://z" },
+			},
+		},
+		);
+	});
 });
 
 describe("parseCustomEndpointsSettingsBody", () => {
@@ -125,5 +152,28 @@ describe("parseCustomEndpointsSettingsBody", () => {
 		const r = parseCustomEndpointsSettingsBody({ endpoints: { ok: { id: "ok", baseUrl: "https://host.example/v1/" } } });
 		assert.ok(r.ok);
 		if (r.ok) assert.equal(r.settings.endpoints?.ok?.baseUrl, "https://host.example/v1");
+	});
+
+	it("thinking fields parse strict: a level array keeps off-implicit levels; maxThinkingTokens floors at 100", () => {
+		const r = parseCustomEndpointsSettingsBody({
+			endpoints: { ok: { id: "ok", baseUrl: "http://x", supportedThinkingLevels: ["off", "low", "high", "xhigh"], maxThinkingTokens: 8192 } },
+		});
+		assert.ok(r.ok);
+		if (r.ok) assert.deepEqual(r.settings.endpoints?.ok, { id: "ok", baseUrl: "http://x", supportedThinkingLevels: ["low", "high", "xhigh"], maxThinkingTokens: 8192 });
+		// A bad level string is a rejection with the rationale, not a silent drop.
+		assert.equal(parseCustomEndpointsSettingsBody({ endpoints: { ok: { id: "ok", baseUrl: "http://x", supportedThinkingLevels: ["ultra"] } } }).ok, false);
+		assert.equal(parseCustomEndpointsSettingsBody({ endpoints: { ok: { id: "ok", baseUrl: "http://x", supportedThinkingLevels: "low" } } }).ok, false);
+		assert.equal(parseCustomEndpointsSettingsBody({ endpoints: { ok: { id: "ok", baseUrl: "http://x", maxThinkingTokens: 99 } } }).ok, false);
+		assert.equal(parseCustomEndpointsSettingsBody({ endpoints: { ok: { id: "ok", baseUrl: "http://x", maxThinkingTokens: 1000.5 } } }).ok, false);
+		// off-only clears the field — reasoning stays off (today's shape).
+		const cleared = parseCustomEndpointsSettingsBody({ endpoints: { ok: { id: "ok", baseUrl: "http://x", supportedThinkingLevels: ["off"] } } });
+		assert.ok(cleared.ok);
+		if (cleared.ok) assert.deepEqual(cleared.settings.endpoints?.ok, { id: "ok", baseUrl: "http://x" });
+	});
+
+	it("a thinking-levels-only endpoint parses clean (the toggle alone federates reasoning)", () => {
+		const r = parseCustomEndpointsSettingsBody({ endpoints: { ok: { id: "ok", baseUrl: "http://x", supportedThinkingLevels: ["minimal", "low", "medium", "high", "xhigh", "max"] } } });
+		assert.ok(r.ok);
+		if (r.ok) assert.deepEqual(r.settings.endpoints?.ok?.supportedThinkingLevels, ["minimal", "low", "medium", "high", "xhigh", "max"]);
 	});
 });

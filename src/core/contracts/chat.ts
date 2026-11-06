@@ -85,6 +85,14 @@ export interface ChatSettings {
 	/** pi thinking level — must be in the chosen model's supported list
 	 *  (getSupportedThinkingLevels; enforced by the settings route). */
 	thinkingLevel?: ThinkingLevel;
+	/** The per-session reasoning-phase ceiling ladder (custom thinking
+	 *  wave, 2026-11-03): every thinking level's token cap for ONE answer's
+	 *  reasoning phase. Read ONLY when the session's model sits on a custom
+	 *  endpoint AND its effective thinking level is not off: chat value >
+	 *  the endpoint's maxThinkingTokens > none (pi's default ladder governs
+	 *  the cap, the server keeps room for the answer). Absent = no override
+	 *  (today's behavior untouched). */
+	thinkingMaxTokens?: number;
 }
 
 

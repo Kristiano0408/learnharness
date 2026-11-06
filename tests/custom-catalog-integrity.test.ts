@@ -32,7 +32,7 @@
 
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "node:test";
-import { createFauxCore, fauxAssistantMessage, fauxToolCall, normalizeContext } from "@earendil-works/pi-ai";
+import { createFauxCore, fauxAssistantMessage, fauxToolCall, getSupportedThinkingLevels, normalizeContext } from "@earendil-works/pi-ai";
 import {
 	piEngineForSpec,
 	piModels,
@@ -492,6 +492,124 @@ describe("the custom endpoint's answer ceiling", () => {
 		await result.result().catch(() => undefined);
 		assert.ok(sentBody);
 		assert.equal("max_tokens" in sentBody, false, "no cap injected for a built-in");
+	});
+});
+
+// ─── 7b. CUSTOM THINKING: LEVELS + REASONING BUDGET (2026-11-03) ───────────
+
+/** Capture one streamFn dispatch's request body through a fake SSE end. */
+async function captureWire(engine: PiEngine): Promise<Record<string, unknown> | undefined> {
+	let sentBody: Record<string, unknown> | undefined;
+	const captureFetch = (async (input, init) => {
+		sentBody = JSON.parse(String(init?.body));
+		return new Response("data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } });
+	}) as typeof fetch;
+	const result = engine.streamFn(
+		engine.model,
+		normalizeContext({ messages: [{ role: "user", content: "hi", timestamp: 1 }], tools: [] }),
+		{ apiKey: "fixture-key", fetch: captureFetch },
+	);
+	await result.result().catch(() => undefined);
+	return sentBody;
+}
+
+describe("the custom endpoint's thinking config (catalog + wire)", () => {
+	it("supportedThinkingLevels federates the model as a reasoning model with exactly those levels", async () => {
+		const { endpoint, provider, spec } = fixture("thinking-catalog", { supportedThinkingLevels: ["low", "medium"] });
+		stubEndpoint([{ id: MODEL_ID }]);
+		syncCustomProvider(endpoint);
+		await resolveEngineForSpec(spec);
+		const [model] = piModels().getModels(provider);
+		assert.ok(model);
+		assert.equal(model.reasoning, true, "the user's claim lands as the catalog's reasoning truth");
+		// The picker's ladder: off (implicit) + exactly the claimed levels.
+		assert.deepEqual(getSupportedThinkingLevels(model), ["off", "low", "medium"]);
+	});
+
+	it("no levels claimed: today's shape untouched — reasoning false, only off", async () => {
+		const { endpoint, provider, spec } = fixture("thinking-absent");
+		stubEndpoint([{ id: MODEL_ID }]);
+		syncCustomProvider(endpoint);
+		await resolveEngineForSpec(spec);
+		const [model] = piModels().getModels(provider);
+		assert.ok(model);
+		assert.equal(model.reasoning, false);
+		assert.deepEqual(getSupportedThinkingLevels(model), ["off"]);
+	});
+
+	it("the level claim is request-facing (re-register + re-discover); a budget change is not", async () => {
+		const { endpoint } = fixture("thinking-signature");
+		stubEndpoint([{ id: MODEL_ID }]);
+		syncCustomProvider(endpoint);
+		await resolveEngineForSpec({ provider: `custom:${endpoint.id}`, id: MODEL_ID, thinkingLevel: "off" });
+		assert.equal(discovery.count, 1);
+		syncCustomProvider({ ...endpoint, supportedThinkingLevels: ["low"] }); // request-facing → re-register
+		await resolveEngineForSpec({ provider: `custom:${endpoint.id}`, id: MODEL_ID, thinkingLevel: "off" });
+		assert.equal(discovery.count, 2, "the level change re-registered the provider — the fresh catalog carries it");
+		syncCustomProvider({ ...endpoint, supportedThinkingLevels: ["low"], maxThinkingTokens: 8192 }); // per-request option → NO re-register
+		assert.equal(discovery.count, 2, "a budget change must not destroy the discovered catalog");
+	});
+
+	it("THE WIRE: thinking on + a resolved ceiling → reasoning_effort and thinking_budget_tokens ride together", async () => {
+		const { endpoint, provider } = fixture("thinking-wire", { supportedThinkingLevels: ["low", "high"], maxThinkingTokens: 4096 });
+		stubEndpoint([{ id: MODEL_ID }]);
+		syncCustomProvider(endpoint);
+		const engine = await resolveEngineForSpec({ provider, id: MODEL_ID, thinkingLevel: "low", thinkingMaxTokens: 2048 });
+		assert.equal(engine.level, "low");
+		const sentBody = await captureWire(engine);
+		assert.ok(sentBody);
+		assert.equal(sentBody.reasoning_effort, "low", "the claimed level rides the effort field the template reads");
+		// The chat's own override (2048) wins over the endpoint default (4096).
+		assert.equal(sentBody.thinking_budget_tokens, 2048, "the resolved ladder lands on the wire through llama.cpp's budget field (server-common.cpp reads thinking_budget_tokens; pi-ai's compat union maps it the same way)");
+	});
+
+	it("THE WIRE: thinking on + no ceiling configured → pi's default ladder clamps under the answer room", async () => {
+		const { endpoint, provider } = fixture("thinking-wire-default", { supportedThinkingLevels: ["high"] });
+		stubEndpoint([{ id: MODEL_ID, max_tokens: 16384 }]);
+		syncCustomProvider(endpoint);
+		const engine = await resolveEngineForSpec({ provider, id: MODEL_ID, thinkingLevel: "high" });
+		const sentBody = await captureWire(engine);
+		assert.ok(sentBody);
+		assert.equal(sentBody.reasoning_effort, "high");
+		// pi's default high budget (16384) clamps under the 16384-token response
+		// ceiling to leave MIN_ANSWER_TOKENs for the answer — a reasoning phase
+		// can never silently eat the whole response.
+		assert.equal(sentBody.thinking_budget_tokens, 16384 - 1024);
+	});
+
+	it("THE WIRE: thinking off rides the EXPLICIT kill switch, not an empty request", async () => {
+		const { endpoint, provider } = fixture("thinking-wire-off", { supportedThinkingLevels: ["low", "high"], maxThinkingTokens: 4096 });
+		stubEndpoint([{ id: MODEL_ID }]);
+		syncCustomProvider(endpoint);
+		const engine = await resolveEngineForSpec({ provider, id: MODEL_ID, thinkingLevel: "off", thinkingMaxTokens: 2048 });
+		const sentBody = await captureWire(engine);
+		assert.ok(sentBody);
+		// The owner's off fix (2026-11-06): an ABSENT effort field is NOT off —
+		// llama.cpp then falls back to the model template's own default and a
+		// reasoner thinks anyway. The documented kill switch is the explicit
+		// reasoning_effort: "none" (server-common.cpp: == "none" →
+		// enable_thinking = false), carried through thinkingLevelMap.off.
+		assert.equal(sentBody.reasoning_effort, "none", "off rides llama.cpp's documented disable value");
+		assert.equal("thinking_budget_tokens" in sentBody, false, "a budget with thinking off would be a lie");
+	});
+
+	it("THE WIRE: a NO-levels endpoint keeps the empty shape (off changes nothing there)", async () => {
+		const { endpoint, provider } = fixture("thinking-wire-off-unclaimed");
+		stubEndpoint([{ id: MODEL_ID }]);
+		syncCustomProvider(endpoint);
+		const engine = await resolveEngineForSpec({ provider, id: MODEL_ID, thinkingLevel: "off" });
+		const sentBody = await captureWire(engine);
+		assert.ok(sentBody);
+		assert.equal("reasoning_effort" in sentBody, false, "reasoning: false keeps pi's off branch closed — today's unchanged wire");
+		assert.equal("thinking_budget_tokens" in sentBody, false);
+	});
+
+	it("a pinned level outside the claim clamps to the nearest supported (the clamp-on-write truth)", async () => {
+		const { endpoint, provider } = fixture("thinking-clamp", { supportedThinkingLevels: ["low"] });
+		stubEndpoint([{ id: MODEL_ID }]);
+		syncCustomProvider(endpoint);
+		const engine = await resolveEngineForSpec({ provider, id: MODEL_ID, thinkingLevel: "high" });
+		assert.equal(engine.level, "low", "pi's nearest-supported clamp — the pin adapts honestly");
 	});
 });
 

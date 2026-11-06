@@ -92,6 +92,22 @@ export interface CustomEndpoint {
 	 *  CUSTOM_ENDPOINT_MAX_TOKENS_FLOOR — smaller answers cannot carry a tool
 	 *  call. */
 	maxOutputTokens?: number;
+	/** The endpoint server's SUPPORTED thinking levels (custom thinking
+	 *  wave, 2026-11-03). An OpenAI-compat server's `/v1/models` cannot be
+	 *  probed for reasoning capability (the catalog reports no thinking
+	 *  truth), so this is the user's explicit claim: non-empty = every
+	 *  discovered model federates into the picker as a reasoning model with
+	 *  exactly these levels (pi's `thinkingLevelMap`); absent/empty = today's
+	 *  behavior untouched (reasoning off, the picker shows only "off"). */
+	supportedThinkingLevels?: ThinkingLevel[];
+	/** The endpoint DEFAULT ceiling for ONE answer's reasoning phase
+	 *  (thinking tokens). With thinking on, pi caps the reasoning phase by
+	 *  level budget and sends it on the wire through the server's budget
+	 *  field (`thinking_token_budget` — llama.cpp/vLLM/Qwen); this value is
+	 *  that ladder for EVERY level. A session may override it per-chat
+	 *  (ChatSettings.thinkingMaxTokens): chat > endpoint > none. Floors at
+	 *  CUSTOM_ENDPOINT_MAX_TOKENS_FLOOR like the answer ceiling. */
+	maxThinkingTokens?: number;
 }
 
 /** The settings.json section: the user's custom endpoints, keyed by id. */
@@ -548,6 +564,12 @@ const boolOrDrop = (value: unknown): boolean | undefined =>
  *  rejection. NO ceiling: a bigger room is the user's call. */
 export const CUSTOM_ENDPOINT_MAX_TOKENS_FLOOR = 100;
 
+/** The floor shared by BOTH custom token ceilings (answer and thinking,
+ *  custom thinking wave): a cap under ~100 tokens cannot carry a tool
+ *  call, so the sanitizer drops smaller numbers and the PUT names this in
+ *  its rejection. NO ceiling: a bigger room is the user's call. */
+export const CUSTOM_ENDPOINT_TOKEN_CEILING_FLOOR = CUSTOM_ENDPOINT_MAX_TOKENS_FLOOR;
+
 function sanitizeGeneral(raw: Record<string, unknown>): GeneralSettings {
 	// No known fields remain: the retired `autoUpdate` (and any future
 	// general key) rides the verbatim unknown-key passthrough in
@@ -555,7 +577,11 @@ function sanitizeGeneral(raw: Record<string, unknown>): GeneralSettings {
 	return { ...raw };
 }
 
-const THINKING_LEVELS: readonly ThinkingLevel[] = [
+/** The canonical level ladder — the same seven strings pi-ai's schema
+ *  accepts (core mirror; every validator shares this one list). Exported
+ *  for the customEndpoints parser (custom thinking wave), which validates
+ *  an endpoint's claimed levels against it. */
+export const THINKING_LEVELS: readonly ThinkingLevel[] = [
 	"off",
 	"minimal",
 	"low",
@@ -619,6 +645,28 @@ function sanitizeCustomEndpoint(raw: unknown): CustomEndpoint | undefined {
 	const rawMax = r.maxOutputTokens;
 	if (typeof rawMax === "number" && Number.isFinite(rawMax) && Number.isInteger(rawMax) && rawMax >= CUSTOM_ENDPOINT_MAX_TOKENS_FLOOR) {
 		out.maxOutputTokens = rawMax;
+	}
+	// supportedThinkingLevels (custom thinking wave): clamp-never-reject —
+	// only known level strings survive, "off" is implicit and never stored
+	// (the picker's ladder always offers it), duplicates drop. An emptied
+	// list drops the field entirely: reasoning stays off, today's behavior.
+	if (Array.isArray(r.supportedThinkingLevels)) {
+		const levels = r.supportedThinkingLevels.filter(
+			(level): level is ThinkingLevel =>
+				typeof level === "string" && level !== "off" && (THINKING_LEVELS as readonly string[]).includes(level),
+		);
+		const unique = [...new Set(levels)];
+		if (unique.length) out.supportedThinkingLevels = unique;
+	}
+	// maxThinkingTokens: the same floor discipline as the answer ceiling.
+	const rawThinkMax = r.maxThinkingTokens;
+	if (
+		typeof rawThinkMax === "number" &&
+		Number.isFinite(rawThinkMax) &&
+		Number.isInteger(rawThinkMax) &&
+		rawThinkMax >= CUSTOM_ENDPOINT_MAX_TOKENS_FLOOR
+	) {
+		out.maxThinkingTokens = rawThinkMax;
 	}
 	return out;
 }
